@@ -1581,3 +1581,12 @@ efile_fadvise(Efile_error* errInfo, int fd, Sint64 offset,
     errno = ERROR_SUCCESS;
     return check_error(0, errInfo);
 }
+
+int
+efile_sendfile(Efile_error* errInfo, int in_fd, int out_fd,
+	       off_t *offset, size_t *count)
+{
+    /* TODO: write TransmitFile based implementation */
+    errno = ENOTSUP;
+    return check_error(-1, errInfo);
+}
