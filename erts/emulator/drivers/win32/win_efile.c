@@ -1589,6 +1589,12 @@ efile_fallocate(Efile_error* errInfo, int fd, Sint64 newFileLength)
     /* No file preallocation method available in Windows. */
     errno = errno_map(ERROR_NOT_SUPPORTED);
     SetLastError(ERROR_NOT_SUPPORTED);
-
+}
+int
+efile_sendfile(Efile_error* errInfo, int in_fd, int out_fd,
+	       off_t *offset, size_t *count)
+{
+    /* TODO: write TransmitFile based implementation */
+    errno = ENOTSUP;
     return check_error(-1, errInfo);
 }
