@@ -36,6 +36,7 @@
 #include "dist.h"
 #include "beam_bp.h"
 #include "beam_catches.h"
+#include "erl_thr_progress.h"
 #ifdef HIPE
 #include "hipe_mode_switch.h"
 #include "hipe_bif1.h"
@@ -44,7 +45,7 @@
 /* #define HARDDEBUG 1 */
 
 #if defined(NO_JUMP_TABLE)
-#  define OpCase(OpCode)    case op_##OpCode: lb_##OpCode
+#  define OpCase(OpCode)    case op_##OpCode
 #  define CountCase(OpCode) case op_count_##OpCode
 #  define OpCode(OpCode)    ((Uint*)op_##OpCode)
 #  define Goto(Rel) {Go = (int)(Rel); goto emulator_loop;}
@@ -52,7 +53,7 @@
 #else
 #  define OpCase(OpCode)    lb_##OpCode
 #  define CountCase(OpCode) lb_count_##OpCode
-#  define Goto(Rel) goto *(Rel)
+#  define Goto(Rel) goto *((void *)Rel)
 #  define LabelAddr(Label) &&Label
 #  define OpCode(OpCode)  (&&lb_##OpCode)
 #endif
@@ -70,7 +71,7 @@ do {									\
     }									\
     else								\
 	erts_lc_check_exact(NULL, 0);					\
-    ERTS_SMP_LC_ASSERT(!ERTS_LC_IS_BLOCKING);				\
+    	ERTS_SMP_LC_ASSERT(!erts_thr_progress_is_blocking());		\
 } while (0)
 #    define ERTS_SMP_REQ_PROC_MAIN_LOCK(P) \
         if ((P)) erts_proc_lc_require_lock((P), ERTS_PROC_LOCK_MAIN)
@@ -198,7 +199,7 @@ do {                                     \
     }                                                        \
   } while (0)
 
-#define ClauseFail() goto lb_jump_f
+#define ClauseFail() goto jump_f
 
 #define SAVE_CP(X)				\
    do {						\
@@ -232,6 +233,12 @@ BeamInstr beam_return_to_trace[1];   /* OpCode(i_return_to_trace) */
 BeamInstr beam_return_trace[1];      /* OpCode(i_return_trace) */
 BeamInstr beam_exception_trace[1];   /* UGLY also OpCode(i_return_trace) */
 BeamInstr beam_return_time_trace[1]; /* OpCode(i_return_time_trace) */
+
+
+/*
+ * We should warn only once for tuple funs.
+ */
+static erts_smp_atomic_t warned_for_tuple_funs;
 
 /*
  * All Beam instructions in numerical order.
@@ -302,44 +309,6 @@ extern int count_instructions;
      (P)->stop = E;  							\
      PROCESS_MAIN_CHK_LOCKS((P));					\
      ERTS_SMP_UNREQ_PROC_MAIN_LOCK((P))
-
-#if defined(HYBRID)
-#  define POST_BIF_GC_SWAPIN_0(_p, _res)				\
-     if (((_p)->mbuf) || (MSO(_p).overhead >= BIN_VHEAP_SZ(_p)) ) {	\
-       _res = erts_gc_after_bif_call((_p), (_res), NULL, 0);		\
-     }									\
-     SWAPIN
-
-#  define POST_BIF_GC_SWAPIN(_p, _res, _regs, _arity)			\
-     if (((_p)->mbuf) || (MSO(_p).overhead >= BIN_VHEAP_SZ(_p)) ) {	\
-       _regs[0] = r(0);							\
-       _res = erts_gc_after_bif_call((_p), (_res), _regs, (_arity));	\
-       r(0) = _regs[0];							\
-     }									\
-     SWAPIN
-#else
-#  define POST_BIF_GC_SWAPIN_0(_p, _res)				\
-     ERTS_SMP_REQ_PROC_MAIN_LOCK((_p));					\
-     PROCESS_MAIN_CHK_LOCKS((_p));					\
-     ERTS_VERIFY_UNUSED_TEMP_ALLOC((_p));				\
-     if (((_p)->mbuf) || (MSO(_p).overhead >= BIN_VHEAP_SZ(_p)) ) {	\
-       _res = erts_gc_after_bif_call((_p), (_res), NULL, 0);		\
-       E = (_p)->stop;							\
-     }									\
-     HTOP = HEAP_TOP((_p))
-
-#  define POST_BIF_GC_SWAPIN(_p, _res, _regs, _arity)			\
-     ERTS_VERIFY_UNUSED_TEMP_ALLOC((_p));				\
-     ERTS_SMP_REQ_PROC_MAIN_LOCK((_p));					\
-     PROCESS_MAIN_CHK_LOCKS((_p));					\
-     if (((_p)->mbuf) || (MSO(_p).overhead >= BIN_VHEAP_SZ(_p)) ) {	\
-       _regs[0] = r(0);							\
-       _res = erts_gc_after_bif_call((_p), (_res), _regs, (_arity));	\
-       r(0) = _regs[0];							\
-       E = (_p)->stop;							\
-     }									\
-     HTOP = HEAP_TOP((_p))
-#endif
 
 #define db(N) (N)
 #define tb(N) (N)
@@ -794,11 +763,11 @@ extern int count_instructions;
      }						\
   } while (0)
 
-#define IsFunction2(F, A, Action)		\
-  do {						\
-     if (is_function_2(c_p, F, A) != am_true ) {\
-          Action;				\
-     }						\
+#define IsFunction2(F, A, Action)			\
+  do {							\
+     if (erl_is_function(c_p, F, A) != am_true ) {	\
+          Action;					\
+     }							\
   } while (0)
 
 #define IsTupleOfArity(Src, Arity, Fail)				      \
@@ -1052,6 +1021,7 @@ init_emulator(void)
 #if defined(VXWORKS)
     init_done = 0;
 #endif
+    erts_smp_atomic_init_nob(&warned_for_tuple_funs, (erts_aint_t) 0);
     process_main();
 }
 
@@ -1094,7 +1064,7 @@ void process_main(void)
     Process* c_p = NULL;
     int reds_used;
 #ifdef DEBUG
-    Eterm pid;
+    ERTS_DECLARE_DUMMY(Eterm pid);
 #endif
 
     /*
@@ -1202,7 +1172,7 @@ void process_main(void)
     c_p = schedule(c_p, reds_used);
     ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
 #ifdef DEBUG
-    pid = c_p->id;
+    pid = c_p->id; /* Save for debugging purpouses */
 #endif
     ERTS_SMP_REQ_PROC_MAIN_LOCK(c_p);
     PROCESS_MAIN_CHK_LOCKS(c_p);
@@ -1541,9 +1511,17 @@ void process_main(void)
 
      PRE_BIF_SWAPOUT(c_p);
      c_p->fcalls = FCALLS - 1;
-     result = send_2(c_p, r(0), x(1));
+     reg[0] = r(0);
+     result = erl_send(c_p, r(0), x(1));
      PreFetch(0, next);
-     POST_BIF_GC_SWAPIN(c_p, result, reg, 2);
+     ERTS_SMP_REQ_PROC_MAIN_LOCK(c_p);
+     PROCESS_MAIN_CHK_LOCKS(c_p);
+     if (c_p->mbuf || MSO(c_p).overhead >= BIN_VHEAP_SZ(c_p)) {
+	 result = erts_gc_after_bif_call(c_p, result, reg, 2);
+	 r(0) = reg[0];
+	 E = c_p->stop;
+     }
+     HTOP = HEAP_TOP(c_p);
      FCALLS = c_p->fcalls;
      if (is_value(result)) {
 	 r(0) = result;
@@ -1551,10 +1529,9 @@ void process_main(void)
 	 NextPF(0, next);
      } else if (c_p->freason == TRAP) {
 	 SET_CP(c_p, I+1);
-	 SET_I(*((BeamInstr **) (BeamInstr) ((c_p)->def_arg_reg + 3)));
+	 SET_I(c_p->i);
 	 SWAPIN;
-	 r(0) = c_p->def_arg_reg[0];
-	 x(1) = c_p->def_arg_reg[1];
+	 r(0) = reg[0];
 	 Dispatch();
      }
      goto find_func_info;
@@ -2209,16 +2186,16 @@ void process_main(void)
 
  OpCase(bif1_fbsd):
     {
-	Eterm (*bf)(Process*, Eterm);
-	Eterm arg;
+	Eterm (*bf)(Process*, Eterm*);
+	Eterm tmp_reg[1];
 	Eterm result;
 
-	GetArg1(2, arg);
+	GetArg1(2, tmp_reg[0]);
 	bf = (BifFunction) Arg(1);
 	c_p->fcalls = FCALLS;
 	PROCESS_MAIN_CHK_LOCKS(c_p);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, arg);
+	result = (*bf)(c_p, tmp_reg);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
 	ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
 	PROCESS_MAIN_CHK_LOCKS(c_p);
@@ -2237,17 +2214,17 @@ void process_main(void)
 
  OpCase(bif1_body_bsd):
     {
-	Eterm (*bf)(Process*, Eterm);
+	Eterm (*bf)(Process*, Eterm*);
 
-	Eterm arg;
+	Eterm tmp_reg[1];
 	Eterm result;
 
-	GetArg1(1, arg);
+	GetArg1(1, tmp_reg[0]);
 	bf = (BifFunction) Arg(0);
 	c_p->fcalls = FCALLS;
 	PROCESS_MAIN_CHK_LOCKS(c_p);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, arg);
+	result = (*bf)(c_p, tmp_reg);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
 	ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
 	PROCESS_MAIN_CHK_LOCKS(c_p);
@@ -2256,7 +2233,7 @@ void process_main(void)
 	if (is_value(result)) {
 	    StoreBifResult(2, result);
 	}
-	reg[0] = arg;
+	reg[0] = tmp_reg[0];
 	SWAPOUT;
 	I = handle_error(c_p, I, reg, bf);
 	goto post_error_handling;
@@ -2380,14 +2357,15 @@ void process_main(void)
   */
  OpCase(i_bif2_fbd):
     {
-	Eterm (*bf)(Process*, Eterm, Eterm);
+	Eterm tmp_reg[2] = {tmp_arg1, tmp_arg2};
+	Eterm (*bf)(Process*, Eterm*);
 	Eterm result;
 
 	bf = (BifFunction) Arg(1);
 	c_p->fcalls = FCALLS;
 	PROCESS_MAIN_CHK_LOCKS(c_p);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, tmp_arg1, tmp_arg2);
+	result = (*bf)(c_p, tmp_reg);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
 	ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
 	PROCESS_MAIN_CHK_LOCKS(c_p);
@@ -2405,13 +2383,14 @@ void process_main(void)
   */
  OpCase(i_bif2_body_bd):
     {
-	Eterm (*bf)(Process*, Eterm, Eterm);
+	Eterm tmp_reg[2] = {tmp_arg1, tmp_arg2};
+	Eterm (*bf)(Process*, Eterm*);
 	Eterm result;
 
 	bf = (BifFunction) Arg(0);
 	PROCESS_MAIN_CHK_LOCKS(c_p);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, tmp_arg1, tmp_arg2);
+	result = (*bf)(c_p, tmp_reg);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
 	ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
 	PROCESS_MAIN_CHK_LOCKS(c_p);
@@ -2431,114 +2410,9 @@ void process_main(void)
      * The most general BIF call.  The BIF may build any amount of data
      * on the heap.  The result is always returned in r(0).
      */
- OpCase(call_bif0_e):
+ OpCase(call_bif_e):
     {
-	Eterm (*bf)(Process*, BeamInstr*) = GET_BIF_ADDRESS(Arg(0));
-
-	PRE_BIF_SWAPOUT(c_p);
-	c_p->fcalls = FCALLS - 1;
-	if (FCALLS <= 0) {
-	    save_calls(c_p, (Export *) Arg(0));
-	}
-
-	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	r(0) = (*bf)(c_p, I);
-	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(r(0)));
-	ERTS_HOLE_CHECK(c_p);
-	POST_BIF_GC_SWAPIN_0(c_p, r(0));
-	FCALLS = c_p->fcalls;
-	if (is_value(r(0))) {
-	    CHECK_TERM(r(0));
-	    Next(1);
-	}
-	else if (c_p->freason == TRAP) {
-	    goto call_bif_trap3;
-	}
-
-	/*
-	 * Error handling.  SWAPOUT is not needed because it was done above.
-	 */
-	ASSERT(c_p->stop == E);
-	reg[0] = r(0);
-	I = handle_error(c_p, I, reg, bf);
-	goto post_error_handling;
-    }
-
- OpCase(call_bif1_e):
-    {
-	Eterm (*bf)(Process*, Eterm, BeamInstr*) = GET_BIF_ADDRESS(Arg(0));
-	Eterm result;
-	BeamInstr *next;
-
-	c_p->fcalls = FCALLS - 1;
-	if (FCALLS <= 0) {
-	    save_calls(c_p, (Export *) Arg(0));
-	}
-	PreFetch(1, next);
-	PRE_BIF_SWAPOUT(c_p);
-	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, r(0), I);
-	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
-	ERTS_HOLE_CHECK(c_p);
-	POST_BIF_GC_SWAPIN(c_p, result, reg, 1);
-	FCALLS = c_p->fcalls;
-        if (is_value(result)) {
-	    r(0) = result;
-	    CHECK_TERM(r(0));
-	    NextPF(1, next);
-	} else if (c_p->freason == TRAP) {
-	    goto call_bif_trap3;
-	}
-
-	/*
-	 * Error handling.  SWAPOUT is not needed because it was done above.
-	 */
-	ASSERT(c_p->stop == E);
-	reg[0] = r(0);
-	I = handle_error(c_p, I, reg, bf);
-	goto post_error_handling;
-    }
-
- OpCase(call_bif2_e):
-    {
-	Eterm (*bf)(Process*, Eterm, Eterm, BeamInstr*) = GET_BIF_ADDRESS(Arg(0));
-	Eterm result;
-	BeamInstr *next;
-
-	PRE_BIF_SWAPOUT(c_p);
-	c_p->fcalls = FCALLS - 1;
-	if (FCALLS <= 0) {
-	   save_calls(c_p, (Export *) Arg(0));
-	}
-	PreFetch(1, next);
-	CHECK_TERM(r(0));
-	CHECK_TERM(x(1));
-	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, r(0), x(1), I);
-	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
-	ERTS_HOLE_CHECK(c_p);
-	POST_BIF_GC_SWAPIN(c_p, result, reg, 2);
-	FCALLS = c_p->fcalls;
-	if (is_value(result)) {
-	    r(0) = result;
-	    CHECK_TERM(r(0));
-	    NextPF(1, next);
-	} else if (c_p->freason == TRAP) {
-	    goto call_bif_trap3;
-	}
-
-	/*
-	 * Error handling.  SWAPOUT is not needed because it was done above.
-	 */
-	ASSERT(c_p->stop == E);
-	reg[0] = r(0);
-	I = handle_error(c_p, I, reg, bf);
-	goto post_error_handling;
-    }
-
- OpCase(call_bif3_e):
-    {
-	Eterm (*bf)(Process*, Eterm, Eterm, Eterm, BeamInstr*) = GET_BIF_ADDRESS(Arg(0));
+	Eterm (*bf)(Process*, Eterm*, BeamInstr*) = GET_BIF_ADDRESS(Arg(0));
 	Eterm result;
 	BeamInstr *next;
 
@@ -2549,23 +2423,28 @@ void process_main(void)
 	}
 	PreFetch(1, next);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-	result = (*bf)(c_p, r(0), x(1), x(2), I);
+	reg[0] = r(0);
+	result = (*bf)(c_p, reg, I);
 	ASSERT(!ERTS_PROC_IS_EXITING(c_p) || is_non_value(result));
 	ERTS_HOLE_CHECK(c_p);
-	POST_BIF_GC_SWAPIN(c_p, result, reg, 3);
+	ERTS_SMP_REQ_PROC_MAIN_LOCK(c_p);
+	PROCESS_MAIN_CHK_LOCKS(c_p);
+	if (c_p->mbuf || MSO(c_p).overhead >= BIN_VHEAP_SZ(c_p)) {
+	    Uint arity = ((Export *)Arg(0))->code[2];
+	    result = erts_gc_after_bif_call(c_p, result, reg, arity);
+	    E = c_p->stop;
+	}
+	HTOP = HEAP_TOP(c_p);
 	FCALLS = c_p->fcalls;
 	if (is_value(result)) {
 	    r(0) = result;
 	    CHECK_TERM(r(0));
 	    NextPF(1, next);
 	} else if (c_p->freason == TRAP) {
-	call_bif_trap3:
 	    SET_CP(c_p, I+2);
-	    SET_I(*((BeamInstr **) (UWord) ((c_p)->def_arg_reg + 3)));
+	    SET_I(c_p->i);
 	    SWAPIN;
-	    r(0) = c_p->def_arg_reg[0];
-	    x(1) = c_p->def_arg_reg[1];
-	    x(2) = c_p->def_arg_reg[2];
+	    r(0) = reg[0];
 	    Dispatch();
 	}
 
@@ -2573,7 +2452,6 @@ void process_main(void)
 	 * Error handling.  SWAPOUT is not needed because it was done above.
 	 */
 	ASSERT(c_p->stop == E);
-	reg[0] = r(0);
 	I = handle_error(c_p, I, reg, bf);
 	goto post_error_handling;
     }
@@ -2669,6 +2547,7 @@ void process_main(void)
  lb_Cl_error: {
      if (Arg(0) != 0) {
 	 OpCase(jump_f): {
+	 jump_f:
 	     SET_I((BeamInstr *) Arg(0));
 	     Goto(*I);
 	 }
@@ -3242,7 +3121,7 @@ void process_main(void)
 
  /* Fall through */
  OpCase(error_action_code): {
- no_error_handler:
+    handle_error:
      reg[0] = r(0);
      SWAPOUT;
      I = handle_error(c_p, NULL, reg, NULL);
@@ -3326,64 +3205,23 @@ void process_main(void)
 	    ASSERT(bif_nif_arity <= 3);
 	    ERTS_SMP_UNREQ_PROC_MAIN_LOCK(c_p);
 	    ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
-	    switch (bif_nif_arity) {
-	    case 3:
-		{
-		    Eterm (*bf)(Process*, Eterm, Eterm, Eterm, BeamInstr*) = vbf;
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-		    nif_bif_result = (*bf)(c_p, r(0), x(1), x(2), I);
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p) ||
-			   is_non_value(nif_bif_result));
-		    ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
-		    PROCESS_MAIN_CHK_LOCKS(c_p);
-		}
-		break;
-	    case 2:
-		{
-		    Eterm (*bf)(Process*, Eterm, Eterm, BeamInstr*) = vbf;
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-		    nif_bif_result = (*bf)(c_p, r(0), x(1), I);
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p) ||
-			   is_non_value(nif_bif_result));
-		    ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
-		    PROCESS_MAIN_CHK_LOCKS(c_p);
-		}
-		break;
-	    case 1:
-		{
-		    Eterm (*bf)(Process*, Eterm, BeamInstr*) = vbf;
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-		    nif_bif_result = (*bf)(c_p, r(0), I);
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p) ||
-			   is_non_value(nif_bif_result));
-		    ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
-		    PROCESS_MAIN_CHK_LOCKS(c_p);
-		}
-		break;
-	    case 0:
-		{
-		    Eterm (*bf)(Process*, BeamInstr*) = vbf;
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p));
-		    nif_bif_result = (*bf)(c_p, I);
-		    ASSERT(!ERTS_PROC_IS_EXITING(c_p) ||
-			   is_non_value(nif_bif_result));
-		    ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
-		    PROCESS_MAIN_CHK_LOCKS(c_p);
-		    break;
-		}
-	    default:
-		erl_exit(1, "apply_bif: invalid arity: %u\n",
-			 bif_nif_arity);
+	    reg[0] = r(0);
+	    {
+		Eterm (*bf)(Process*, Eterm*, BeamInstr*) = vbf;
+		ASSERT(!ERTS_PROC_IS_EXITING(c_p));
+		nif_bif_result = (*bf)(c_p, reg, I);
+		ASSERT(!ERTS_PROC_IS_EXITING(c_p) ||
+		       is_non_value(nif_bif_result));
+		ERTS_VERIFY_UNUSED_TEMP_ALLOC(c_p);
+		PROCESS_MAIN_CHK_LOCKS(c_p);
 	    }
 
 	apply_bif_or_nif_epilogue:
 	    ERTS_SMP_REQ_PROC_MAIN_LOCK(c_p);
 	    ERTS_HOLE_CHECK(c_p);
 	    if (c_p->mbuf) {
-		reg[0] = r(0);
 		nif_bif_result = erts_gc_after_bif_call(c_p, nif_bif_result,
 						  reg, bif_nif_arity);
-		r(0) = reg[0];
 	    }
 	    SWAPIN;  /* There might have been a garbage collection. */
 	    FCALLS = c_p->fcalls;
@@ -3394,17 +3232,14 @@ void process_main(void)
 		c_p->cp = 0;
 		Goto(*I);
 	    } else if (c_p->freason == TRAP) {
-		SET_I(*((BeamInstr **) (UWord) ((c_p)->def_arg_reg + 3)));
-		r(0) = c_p->def_arg_reg[0];
-		x(1) = c_p->def_arg_reg[1];
-		x(2) = c_p->def_arg_reg[2];
+		SET_I(c_p->i);
+		r(0) = reg[0];
 		if (c_p->flags & F_HIBERNATE_SCHED) {
 		    c_p->flags &= ~F_HIBERNATE_SCHED;
 		    goto do_schedule;
 		}
 		Dispatch();
 	    }
-	    reg[0] = r(0);
 	    I = handle_error(c_p, c_p->cp, reg, vbf);
 	    goto post_error_handling;
 	}
@@ -3447,7 +3282,7 @@ void process_main(void)
  OpCase(i_func_info_IaaI): {
      c_p->freason = EXC_FUNCTION_CLAUSE;
      c_p->current = I + 2;
-     goto lb_error_action_code;
+     goto handle_error;
  }
 
  OpCase(try_case_end_s):
@@ -4920,7 +4755,12 @@ void process_main(void)
      OpCase(fclearerror):
      OpCase(i_fcheckerror):
 	 erl_exit(1, "fclearerror/i_fcheckerror without fpe signals (beam_emu)");
+#  define ERTS_NO_FPE_CHECK_INIT ERTS_FP_CHECK_INIT
+#  define ERTS_NO_FPE_ERROR ERTS_FP_ERROR
 #else
+#  define ERTS_NO_FPE_CHECK_INIT(p)
+#  define ERTS_NO_FPE_ERROR(p, a, b)
+
      OpCase(fclearerror): {
 	 BeamInstr *next;
 
@@ -4936,10 +4776,6 @@ void process_main(void)
 	 ERTS_FP_ERROR(c_p, freg[0].fd, goto fbadarith);
 	 NextPF(0, next);
      }
-#  undef ERTS_FP_CHECK_INIT
-#  undef ERTS_FP_ERROR
-#  define ERTS_FP_CHECK_INIT(p)
-#  define ERTS_FP_ERROR(p, a, b)
 #endif
 
 
@@ -4947,45 +4783,45 @@ void process_main(void)
      BeamInstr *next;
 
      PreFetch(3, next);
-     ERTS_FP_CHECK_INIT(c_p);
+     ERTS_NO_FPE_CHECK_INIT(c_p);
      fb(Arg(2)) = fb(Arg(0)) + fb(Arg(1));
-     ERTS_FP_ERROR(c_p, fb(Arg(2)), goto fbadarith);
+     ERTS_NO_FPE_ERROR(c_p, fb(Arg(2)), goto fbadarith);
      NextPF(3, next);
  }
  OpCase(i_fsub_lll): {
      BeamInstr *next;
 
      PreFetch(3, next);
-     ERTS_FP_CHECK_INIT(c_p);
+     ERTS_NO_FPE_CHECK_INIT(c_p);
      fb(Arg(2)) = fb(Arg(0)) - fb(Arg(1));
-     ERTS_FP_ERROR(c_p, fb(Arg(2)), goto fbadarith);
+     ERTS_NO_FPE_ERROR(c_p, fb(Arg(2)), goto fbadarith);
      NextPF(3, next);
  }
  OpCase(i_fmul_lll): {
      BeamInstr *next;
 
      PreFetch(3, next);
-     ERTS_FP_CHECK_INIT(c_p);
+     ERTS_NO_FPE_CHECK_INIT(c_p);
      fb(Arg(2)) = fb(Arg(0)) * fb(Arg(1));
-     ERTS_FP_ERROR(c_p, fb(Arg(2)), goto fbadarith);
+     ERTS_NO_FPE_ERROR(c_p, fb(Arg(2)), goto fbadarith);
      NextPF(3, next);
  }
  OpCase(i_fdiv_lll): {
      BeamInstr *next;
 
      PreFetch(3, next);
-     ERTS_FP_CHECK_INIT(c_p);
+     ERTS_NO_FPE_CHECK_INIT(c_p);
      fb(Arg(2)) = fb(Arg(0)) / fb(Arg(1));
-     ERTS_FP_ERROR(c_p, fb(Arg(2)), goto fbadarith);
+     ERTS_NO_FPE_ERROR(c_p, fb(Arg(2)), goto fbadarith);
      NextPF(3, next);
  }
  OpCase(i_fnegate_ll): {
      BeamInstr *next;
 
      PreFetch(2, next);
-     ERTS_FP_CHECK_INIT(c_p);
+     ERTS_NO_FPE_CHECK_INIT(c_p);
      fb(Arg(1)) = -fb(Arg(0));
-     ERTS_FP_ERROR(c_p, fb(Arg(1)), goto fbadarith);
+     ERTS_NO_FPE_ERROR(c_p, fb(Arg(1)), goto fbadarith);
      NextPF(2, next);
 
  fbadarith:
@@ -5132,7 +4968,7 @@ void process_main(void)
      if (I) {
 	 Goto(*I);
      }
-     goto no_error_handler;
+     goto handle_error;
  }
 
 
@@ -6359,6 +6195,26 @@ call_fun(Process* p,		/* Current process. */
 	if (!is_atom(module) || !is_atom(function)) {
 	    goto badfun;
 	}
+
+	/*
+	 * If this is the first time a tuple fun is used,
+	 * send a warning to the logger.
+	 */
+	if (erts_smp_atomic_xchg_nob(&warned_for_tuple_funs,
+				     (erts_aint_t) 1) == 0) {
+	    erts_dsprintf_buf_t* dsbufp;
+
+	    dsbufp = erts_create_logger_dsbuf();
+	    erts_dsprintf(dsbufp, "Call to tuple fun {%T,%T}.\n\n"
+			  "Tuple funs are deprecated and will be removed "
+			  "in R16. Use \"fun M:F/A\" instead, for example "
+			  "\"fun %T:%T/%d\".\n\n"
+			  "(This warning will only be shown the first time "
+			  "a tuple fun is called.)\n",
+			  module, function, module, function, arity);
+	    erts_send_warning_to_logger(p->group_leader, dsbufp);
+	}
+
 	if ((ep = erts_find_export_entry(module, function, arity)) == NULL) {
 	    ep = erts_find_export_entry(erts_proc_get_error_handler(p),
 					am_undefined_function, 3);

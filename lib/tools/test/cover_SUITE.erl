@@ -130,13 +130,20 @@ compile(Config) when is_list(Config) ->
     ?line {ok,_} = compile:file(x),
     ?line {ok,_} = compile:file("d/y",[debug_info,{outdir,"d"},report]),
     ?line Key = "A Krypto Key",
-    ?line {ok,_} = compile:file(crypt, [debug_info,{debug_info_key,Key},report]),
+    CryptoWorks = crypto_works(),
+    case CryptoWorks of
+	false ->
+	    {ok,_} = compile:file(crypt, [debug_info,report]),
+	    {ok,crypt} = cover:compile_beam("crypt.beam");
+	true ->
+	    {ok,_} = compile:file(crypt, [{debug_info_key,Key},report]),
+	    {error,{encrypted_abstract_code,_}} =
+		cover:compile_beam("crypt.beam"),
+	    ok = beam_lib:crypto_key_fun(simple_crypto_fun(Key)),
+	    {ok,crypt} = cover:compile_beam("crypt.beam")
+    end,
     ?line {ok,v} = cover:compile_beam(v),
     ?line {ok,w} = cover:compile_beam("w.beam"),
-    ?line {error,{encrypted_abstract_code,_}} =
-	cover:compile_beam("crypt.beam"),
-    ?line ok = beam_lib:crypto_key_fun(simple_crypto_fun(Key)),
-    ?line {ok,crypt} = cover:compile_beam("crypt.beam"),
     ?line {error,{no_abstract_code,"./x.beam"}} = cover:compile_beam(x),
     ?line {error,{already_cover_compiled,no_beam_found,a}}=cover:compile_beam(a),
     ?line {error,non_existing} = cover:compile_beam(z),
@@ -147,6 +154,15 @@ compile(Config) when is_list(Config) ->
     ?line decompile([v,w,y]),
     ?line Files = lsfiles(),
     ?line remove(files(Files, ".beam")).
+
+crypto_works() ->
+    try crypto:start() of
+	{error,{already_started,crypto}} -> true;
+	ok -> true
+    catch
+	error:_ ->
+	    false
+    end.
 
 simple_crypto_fun(Key) ->
     fun(init) -> ok;
@@ -583,21 +599,14 @@ otp_6115_1(Config) ->
     %% called -- running cover compiled code when there is no cover
     %% server and thus no ets tables to bump counters in, makes no
     %% sense.
-    ?line Pid1 = f1:start_fail(),
-
-    %% If f1 is cover compiled, a process P is started with a
-    %% reference to the fun created in start_ok/0, and
-    %% cover:stop() is called, then P should survive.
-    %% This is because (the fun held by) P always references the current
-    %% version of the module, and is thus not affected by the cover
-    %% compiled version being unloaded.
-    ?line Pid2 = f1:start_ok(),
+    Pid1 = f1:start_a(),
+    Pid2 = f1:start_b(),
 
     %% Now stop cover
     ?line cover:stop(),
     
-    %% Ensure that f1 is loaded (and not cover compiled), that Pid1
-    %% is dead and Pid2 is alive, but with no reference to old code
+    %% Ensure that f1 is loaded (and not cover compiled), and that
+    %% both Pid1 and Pid2 are dead.
     case code:which(f1) of
 	Beam when is_list(Beam) ->
 	    ok;
@@ -608,19 +617,15 @@ otp_6115_1(Config) ->
 	undefined ->
 	    ok;
 	_PI1 ->
-	    RefToOldP = erlang:check_process_code(Pid1, f1),
-	    ?line ?t:fail({"Pid1 still alive", RefToOldP})
+	    RefToOldP1 = erlang:check_process_code(Pid1, f1),
+	    ?t:fail({"Pid1 still alive", RefToOldP1})
     end,
     case process_info(Pid2) of
-	PI2 when is_list(PI2) ->
-	    case erlang:check_process_code(Pid2, f2) of
-		false ->
-		    ok;
-		true ->
-		    ?line ?t:fail("Pid2 has ref to old code")
-	    end;
 	undefined ->
-	    ?line ?t:fail("Pid2 has died")
+	    ok;
+	_PI2 ->
+	    RefToOldP2 = erlang:check_process_code(Pid1, f2),
+	    ?t:fail({"Pid2 still alive", RefToOldP2})
     end,
 
     ?line file:set_cwd(CWD),

@@ -109,6 +109,9 @@ special_init(TestCase, Config)
        TestCase == erlang_server_openssl_client_no_wrap_sequence_number ->
     check_sane_openssl_renegotaite(Config);
 
+special_init(ssl2_erlang_server_openssl_client, Config) ->
+    check_sane_openssl_sslv2(Config);
+
 special_init(_, Config) ->
     Config.
     
@@ -168,7 +171,8 @@ all() ->
      tls1_erlang_server_openssl_client_client_cert,
      tls1_erlang_server_erlang_client_client_cert,
      ciphers_rsa_signed_certs, ciphers_dsa_signed_certs,
-     erlang_client_bad_openssl_server, expired_session,
+     erlang_client_bad_openssl_server,
+     expired_session,
      ssl2_erlang_server_openssl_client].
 
 groups() -> 
@@ -222,7 +226,6 @@ erlang_client_openssl_server(Config) when is_list(Config) ->
   
     %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
@@ -256,9 +259,9 @@ erlang_server_openssl_client(Config) when is_list(Config) ->
     port_command(OpenSslPort, Data),
     
     ssl_test_lib:check_result(Server, ok),
-    
-    ssl_test_lib:close(Server),
 
+    %% Clean close down!   Server needs to be closed first !!
+    ssl_test_lib:close(Server),
     close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
@@ -306,7 +309,6 @@ tls1_erlang_client_openssl_server_dsa_cert(Config) when is_list(Config) ->
    
     %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
@@ -346,8 +348,8 @@ tls1_erlang_server_openssl_client_dsa_cert(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Server, ok),
     
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
-
     close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
@@ -395,7 +397,6 @@ ssl3_erlang_client_openssl_server_dsa_cert(Config) when is_list(Config) ->
    
     %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
@@ -435,8 +436,8 @@ ssl3_erlang_server_openssl_client_dsa_cert(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Server, ok),
     
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
-
     close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
@@ -475,8 +476,8 @@ erlang_server_openssl_client_reuse_session(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Server, ok),
     
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
-
     close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
@@ -525,7 +526,6 @@ erlang_client_openssl_server_renegotiate(Config) when is_list(Config) ->
    
     %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
@@ -574,7 +574,6 @@ erlang_client_openssl_server_no_wrap_sequence_number(Config) when is_list(Config
 
     %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
@@ -615,8 +614,8 @@ erlang_server_openssl_client_no_wrap_sequence_number(Config) when is_list(Config
     
     ssl_test_lib:check_result(Server, ok),
     
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
-
     close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
@@ -663,7 +662,6 @@ erlang_client_openssl_server_no_server_ca_cert(Config) when is_list(Config) ->
 
     %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
@@ -674,6 +672,7 @@ ssl3_erlang_client_openssl_server(doc) ->
 ssl3_erlang_client_openssl_server(suite) ->
     [];
 ssl3_erlang_client_openssl_server(Config) when is_list(Config) ->
+    process_flag(trap_exit, true),
     ServerOpts = ?config(server_opts, Config),  
     ClientOpts = ?config(client_opts, Config),  
 
@@ -700,11 +699,11 @@ ssl3_erlang_client_openssl_server(Config) when is_list(Config) ->
 					{options, 
 					 [{versions, [sslv3]} | ClientOpts]}]),
     ssl_test_lib:check_result(Client, ok),
-    
-    ssl_test_lib:close(Client),
-    %% Clean close down!
+
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
-    test_server:sleep(?SLEEP),
+    ssl_test_lib:close(Client),
+    process_flag(trap_exit, false),
     ok.
 
 %%--------------------------------------------------------------------
@@ -714,6 +713,7 @@ ssl3_erlang_server_openssl_client(doc) ->
 ssl3_erlang_server_openssl_client(suite) ->
     [];
 ssl3_erlang_server_openssl_client(Config) when is_list(Config) ->
+    process_flag(trap_exit, true),
     ServerOpts = ?config(server_opts, Config),  
     
     {_, ServerNode, _} = ssl_test_lib:run_where(Config),
@@ -734,10 +734,10 @@ ssl3_erlang_server_openssl_client(Config) when is_list(Config) ->
     OpenSslPort =  open_port({spawn, Cmd}, [stderr_to_stdout]), 
 
     ssl_test_lib:check_result(Server, ok),
-    
-    close_port(OpenSslPort), %% openssl server first
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
-    test_server:sleep(?SLEEP),
+    close_port(OpenSslPort),
+    process_flag(trap_exit, false),
     ok.
 
 %%--------------------------------------------------------------------
@@ -779,7 +779,7 @@ ssl3_erlang_client_openssl_server_client_cert(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Client, ok),
   
-    %% Clean close down!
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort), 
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
@@ -824,9 +824,9 @@ ssl3_erlang_server_openssl_client_client_cert(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Server, ok),
     
-    close_port(OpenSslPort), %% openssl server first
+    %% Clean close down!   Server needs to be closed first !!
+    close_port(OpenSslPort),
     ssl_test_lib:close(Server),
-    %% Clean close down!
     process_flag(trap_exit, false),
     ok.
 
@@ -849,7 +849,9 @@ ssl3_erlang_server_erlang_client_client_cert(Config) when is_list(Config) ->
     Server = ssl_test_lib:start_server([{node, ServerNode}, {port, 0}, 
 					{from, self()}, 
 					{mfa, {?MODULE, 
-					       erlang_ssl_receive, [Data]}},
+					       erlang_ssl_receive, 
+					       %% Due to 1/n-1 splitting countermeasure Rizzo/Duong-Beast
+					       [Data]}},
 					{options, 
 					 [{verify , verify_peer} 
 					  | ServerOpts]}]),
@@ -858,6 +860,7 @@ ssl3_erlang_server_erlang_client_client_cert(Config) when is_list(Config) ->
     Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
 					{host, Hostname},
 					{from, self()}, 
+					%% Due to 1/n-1 splitting countermeasure Rizzo/Duong-Beast
 					{mfa, {ssl, send, [Data]}},
 					{options, 
 					 [{versions, [sslv3]} | ClientOpts]}]),
@@ -868,6 +871,7 @@ ssl3_erlang_server_erlang_client_client_cert(Config) when is_list(Config) ->
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
+
 
 %%--------------------------------------------------------------------
 
@@ -907,10 +911,10 @@ tls1_erlang_client_openssl_server(Config) when is_list(Config) ->
 					 [{versions, [tlsv1]} | ClientOpts]}]),
     
     ssl_test_lib:check_result(Client, ok),
-    
-    ssl_test_lib:close(Client),
-    %% Clean close down!
+
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
+    ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
     ok.
 
@@ -943,9 +947,9 @@ tls1_erlang_server_openssl_client(Config) when is_list(Config) ->
      
     ssl_test_lib:check_result(Server, ok),
     
-    %% Clean close down!
-    close_port(OpenSslPort),
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
+    close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
 
@@ -989,7 +993,7 @@ tls1_erlang_client_openssl_server_client_cert(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Client, ok),
   
-    %% Clean close down!
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
     ssl_test_lib:close(Client),
     process_flag(trap_exit, false),
@@ -1034,9 +1038,9 @@ tls1_erlang_server_openssl_client_client_cert(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Server, ok),
     
-    %% Clean close down!
-    close_port(OpenSslPort),
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
+    close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
 
@@ -1071,9 +1075,7 @@ tls1_erlang_server_erlang_client_client_cert(Config) when is_list(Config) ->
 					 [{versions, [tlsv1]} | ClientOpts]}]),
     
     ssl_test_lib:check_result(Server, ok, Client, ok),
-    
     ssl_test_lib:close(Server),
-    %% Clean close down!
     process_flag(trap_exit, false),
     ok.
 %%--------------------------------------------------------------------
@@ -1136,7 +1138,7 @@ cipher(CipherSuite, Version, Config, ClientOpts, ServerOpts) ->
     CertFile = proplists:get_value(certfile, ServerOpts),
     KeyFile = proplists:get_value(keyfile, ServerOpts),
    
-    Cmd = "openssl s_server -accept " ++ integer_to_list(Port)  ++ 
+    Cmd = "openssl s_server -accept " ++ integer_to_list(Port)  ++  version_flag(Version) ++
 	" -cert " ++ CertFile ++ " -key " ++ KeyFile ++ "",
 
     test_server:format("openssl cmd: ~p~n", [Cmd]),
@@ -1171,8 +1173,8 @@ cipher(CipherSuite, Version, Config, ClientOpts, ServerOpts) ->
     
     Result = ssl_test_lib:wait_for_result(Client, ok),    
 
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpenSslPort),
-    %% Clean close down!
     ssl_test_lib:close(Client),
     
     Return = case Result of
@@ -1183,6 +1185,12 @@ cipher(CipherSuite, Version, Config, ClientOpts, ServerOpts) ->
 	     end,
     process_flag(trap_exit, false),
     Return.
+
+
+version_flag(tlsv1) ->
+    " -tls1 ";
+version_flag(sslv3) ->
+    " -ssl3 ".
 
 %%--------------------------------------------------------------------
 erlang_client_bad_openssl_server(doc) ->
@@ -1199,26 +1207,26 @@ erlang_client_bad_openssl_server(Config) when is_list(Config) ->
     Port = ssl_test_lib:inet_port(node()),
     CertFile = proplists:get_value(certfile, ServerOpts),
     KeyFile = proplists:get_value(keyfile, ServerOpts),
-   
+
     Cmd = "openssl s_server -accept " ++ integer_to_list(Port)  ++ 
-	" -cert " ++ CertFile ++ " -key " ++ KeyFile ++ "", 
-    
+ 	" -cert " ++ CertFile ++ " -key " ++ KeyFile ++ "",
+
     test_server:format("openssl cmd: ~p~n", [Cmd]),
 
     OpensslPort =  open_port({spawn, Cmd}, [stderr_to_stdout]), 
-
+    
     wait_for_openssl_server(),
     
     Client0 = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
-					{host, Hostname},
-					{from, self()}, 
-					{mfa, {?MODULE, server_sent_garbage, []}},
-					{options, 
-					 [{versions, [tlsv1]} | ClientOpts]}]),
+					 {host, Hostname},
+					 {from, self()}, 
+ 					{mfa, {?MODULE, server_sent_garbage, []}},
+					 {options,
+					  [{versions, [tlsv1]} | ClientOpts]}]),
     
     %% Send garbage
     port_command(OpensslPort, ?OPENSSL_GARBAGE),
-    
+
     test_server:sleep(?SLEEP),
 
     Client0 ! server_sent_garbage,
@@ -1228,17 +1236,16 @@ erlang_client_bad_openssl_server(Config) when is_list(Config) ->
     ssl_test_lib:close(Client0),
     
     %% Make sure openssl does not hang and leave zombie process
-    Client1 = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
-					 {host, Hostname},
-					 {from, self()}, 
-					 {mfa, {ssl_test_lib, no_result_msg, []}},
-					 {options, 
-					  [{versions, [tlsv1]} | ClientOpts]}]),
-    
-    ssl_test_lib:close(Client1),
-    
-    %% Clean close down!
+    Client1 = ssl_test_lib:start_client([{node, ClientNode}, {port, Port},
+ 					 {host, Hostname},
+ 					 {from, self()},
+ 					 {mfa, {ssl_test_lib, no_result_msg, []}},
+ 					 {options,
+ 					  [{versions, [tlsv1]} | ClientOpts]}]),
+
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
+    ssl_test_lib:close(Client1),
     process_flag(trap_exit, false),
     ok.
 
@@ -1297,6 +1304,7 @@ expired_session(Config) when is_list(Config) ->
 				   {mfa, {ssl_test_lib, no_result, []}},
 				   {from, self()},  {options, ClientOpts}]),  
 
+    %% Clean close down!   Server needs to be closed first !!
     close_port(OpensslPort),
     ssl_test_lib:close(Client2),
     process_flag(trap_exit, false).
@@ -1329,8 +1337,8 @@ ssl2_erlang_server_openssl_client(Config) when is_list(Config) ->
     
     ssl_test_lib:check_result(Server, {error,"protocol version"}),
     
+    %% Clean close down!   Server needs to be closed first !!
     ssl_test_lib:close(Server),
-
     close_port(OpenSslPort),
     process_flag(trap_exit, false),
     ok.
@@ -1346,6 +1354,8 @@ erlang_ssl_receive(Socket, Data) ->
 	    %% open_ssl server sometimes hangs waiting in blocking read
 	    ssl:send(Socket, "Got it"), 
 	    ok;
+	{ssl, Socket, Byte} when length(Byte) == 1 ->
+	    erlang_ssl_receive(Socket, tl(Data));
 	{Port, {data,Debug}} when is_port(Port) ->
 	    io:format("openssl ~s~n",[Debug]),
 	    erlang_ssl_receive(Socket,Data);
@@ -1430,6 +1440,14 @@ check_sane_openssl_renegotaite(Config) ->
 	    {skip, "Known renegotiation bug in OppenSSL"};
 	"OpenSSL 0.9.7" ++ _ ->
 	    {skip, "Known renegotiation bug in OppenSSL"};
+	_ ->
+	    Config
+    end.
+
+check_sane_openssl_sslv2(Config) ->
+    case os:cmd("openssl version") of
+	"OpenSSL 1.0.0e" ++ _ ->
+	    {skip, "Known option bug"};
 	_ ->
 	    Config
     end.

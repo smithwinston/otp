@@ -87,14 +87,8 @@
          handle_error/5,
          handle_request/3]).
 
--ifdef(DIAMETER_CT).
+-include("diameter.hrl").
 -include("diameter_gen_base_rfc3588.hrl").
--else.
--include_lib("diameter/include/diameter_gen_base_rfc3588.hrl").
--endif.
-
--include_lib("diameter/include/diameter.hrl").
--include("diameter_ct.hrl").
 
 %% ===========================================================================
 
@@ -251,7 +245,7 @@ start_services(_Config) ->
     ok = diameter:start_service(?CLIENT, ?SERVICE(?CLIENT)).
 
 add_transports(Config) ->
-    LRef = ?util:listen(?SERVER, tcp),
+    LRef = ?util:listen(?SERVER, tcp, [{capabilities_cb, fun capx/2}]),
     CRef = ?util:connect(?CLIENT, tcp, LRef),
     ?util:write_priv(Config, "transport", {LRef, CRef}).
 
@@ -265,6 +259,10 @@ stop_services(_Config) ->
 
 stop(_Config) ->
     ok = diameter:stop().
+
+capx(_, #diameter_caps{origin_host = {OH,DH}}) ->
+    io:format("connection: ~p -> ~p~n", [DH,OH]),
+    ok.
 
 %% ===========================================================================
 

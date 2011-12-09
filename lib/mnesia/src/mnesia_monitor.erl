@@ -80,9 +80,9 @@
 		going_down = [], tm_started = false, early_connects = [],
 		connecting, mq = []}).
 
--define(current_protocol_version,  {8,0}).
+-define(current_protocol_version,  {8,1}).
 
--define(previous_protocol_version, {7,6}).
+-define(previous_protocol_version, {8,0}).
 
 start() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE,
@@ -188,7 +188,7 @@ protocol_version() ->
 %% A sorted list of acceptable protocols the
 %% preferred protocols are first in the list
 acceptable_protocol_versions() ->
-    [protocol_version(), ?previous_protocol_version].
+    [protocol_version(), ?previous_protocol_version, {7,6}].
 
 needs_protocol_conversion(Node) ->
     case {?catch_val({protocol, Node}), protocol_version()} of
@@ -417,6 +417,8 @@ handle_call({negotiate_protocol, Mon, Version, Protocols}, From, State)
 	    case hd(Protocols) of
 		?previous_protocol_version ->
 		    accept_protocol(Mon, MyVersion, ?previous_protocol_version, From, State);
+		{7,6} ->
+		    accept_protocol(Mon, MyVersion, {7,6}, From, State);
 		_ ->
 		    verbose("Connection with ~p rejected. "
 			    "version = ~p, protocols = ~p, "
@@ -536,7 +538,11 @@ handle_info({'EXIT', Pid, R}, State) when Pid == State#state.supervisor ->
 
 handle_info({'EXIT', Pid, fatal}, State) when node(Pid) == node() ->
     dbg_out("~p got FATAL ERROR from: ~p~n",[?MODULE, Pid]),
-    exit(State#state.supervisor, shutdown),
+    %% This may hang supervisor if a shutdown happens at the same time as an fatal
+    %% is in progress
+    %% exit(State#state.supervisor, shutdown),
+    %% It is better to kill an innocent process
+    catch exit(whereis(mnesia_locker), kill),
     {noreply, State};
 
 handle_info(Msg = {'EXIT',Pid,_}, State) ->

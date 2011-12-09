@@ -52,6 +52,7 @@
 #define ERTS_WANT_GOT_SIGUSR1
 #define WANT_NONBLOCKING    /* must define this to pull in defs from sys.h */
 #include "sys.h"
+#include "erl_thr_progress.h"
 
 #if defined(__APPLE__) && defined(__MACH__) && !defined(__DARWIN__)
 #define __DARWIN__ 1
@@ -127,7 +128,6 @@ static ErtsSysReportExit *report_exit_list;
 static ErtsSysReportExit *report_exit_transit_list;
 #endif
 
-extern int  check_async_ready(void);
 extern int  driver_interrupt(int, int);
 extern void do_break(void);
 
@@ -263,8 +263,9 @@ int erts_use_kernel_poll = 0;
 struct {
     int (*select)(ErlDrvPort, ErlDrvEvent, int, int);
     int (*event)(ErlDrvPort, ErlDrvEvent, ErlDrvEventData);
+    void (*check_io_as_interrupt)(void);
     void (*check_io_interrupt)(int);
-    void (*check_io_interrupt_tmd)(int, long);
+    void (*check_io_interrupt_tmd)(int, erts_short_time_t);
     void (*check_io)(int);
     Uint (*size)(void);
     Eterm (*info)(void *);
@@ -302,6 +303,9 @@ init_check_io(void)
     if (erts_use_kernel_poll) {
 	io_func.select			= driver_select_kp;
 	io_func.event			= driver_event_kp;
+#ifdef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+	io_func.check_io_as_interrupt	= erts_check_io_async_sig_interrupt_kp;
+#endif
 	io_func.check_io_interrupt	= erts_check_io_interrupt_kp;
 	io_func.check_io_interrupt_tmd	= erts_check_io_interrupt_timed_kp;
 	io_func.check_io		= erts_check_io_kp;
@@ -314,6 +318,9 @@ init_check_io(void)
     else {
 	io_func.select			= driver_select_nkp;
 	io_func.event			= driver_event_nkp;
+#ifdef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+	io_func.check_io_as_interrupt	= erts_check_io_async_sig_interrupt_nkp;
+#endif
 	io_func.check_io_interrupt	= erts_check_io_interrupt_nkp;
 	io_func.check_io_interrupt_tmd	= erts_check_io_interrupt_timed_nkp;
 	io_func.check_io		= erts_check_io_nkp;
@@ -325,6 +332,11 @@ init_check_io(void)
     }
 }
 
+#ifdef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+#define ERTS_CHK_IO_AS_INTR()	(*io_func.check_io_as_interrupt)()
+#else
+#define ERTS_CHK_IO_AS_INTR()	(*io_func.check_io_interrupt)(1)
+#endif
 #define ERTS_CHK_IO_INTR	(*io_func.check_io_interrupt)
 #define ERTS_CHK_IO_INTR_TMD	(*io_func.check_io_interrupt_tmd)
 #define ERTS_CHK_IO		(*io_func.check_io)
@@ -339,6 +351,11 @@ init_check_io(void)
     max_files = erts_check_io_max_files();
 }
 
+#ifdef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+#define ERTS_CHK_IO_AS_INTR()	erts_check_io_async_sig_interrupt()
+#else
+#define ERTS_CHK_IO_AS_INTR()	erts_check_io_interrupt(1)
+#endif
 #define ERTS_CHK_IO_INTR	erts_check_io_interrupt
 #define ERTS_CHK_IO_INTR_TMD	erts_check_io_interrupt_timed
 #define ERTS_CHK_IO		erts_check_io
@@ -346,15 +363,15 @@ init_check_io(void)
 
 #endif
 
-#ifdef ERTS_SMP
 void
 erts_sys_schedule_interrupt(int set)
 {
     ERTS_CHK_IO_INTR(set);
 }
 
+#ifdef ERTS_SMP
 void
-erts_sys_schedule_interrupt_timed(int set, long msec)
+erts_sys_schedule_interrupt_timed(int set, erts_short_time_t msec)
 {
     ERTS_CHK_IO_INTR_TMD(set, msec);
 }
@@ -731,7 +748,7 @@ break_requested(void)
       erl_exit(ERTS_INTR_EXIT, "");
 
   ERTS_SET_BREAK_REQUESTED;
-  ERTS_CHK_IO_INTR(1); /* Make sure we don't sleep in poll */
+  ERTS_CHK_IO_AS_INTR(); /* Make sure we don't sleep in poll */
 }
 
 /* set up signal handlers for break and quit */
@@ -931,18 +948,13 @@ void
 os_flavor(char* namebuf, 	/* Where to return the name. */
 	  unsigned size) 	/* Size of name buffer. */
 {
-    static int called = 0;
-    static struct utsname uts;	/* Information about the system. */
+    struct utsname uts;		/* Information about the system. */
+    char* s;
 
-    if (!called) {
-	char* s;
-
-	(void) uname(&uts);
-	called = 1;
-	for (s = uts.sysname; *s; s++) {
-	    if (isupper((int) *s)) {
-		*s = tolower((int) *s);
-	    }
+    (void) uname(&uts);
+    for (s = uts.sysname; *s; s++) {
+	if (isupper((int) *s)) {
+	    *s = tolower((int) *s);
 	}
     }
     strcpy(namebuf, uts.sysname);
@@ -1107,31 +1119,6 @@ struct erl_drv_entry vanilla_driver_entry = {
     stop_select
 };
 
-#if defined(USE_THREADS) && !defined(ERTS_SMP)
-static int  async_drv_init(void);
-static ErlDrvData async_drv_start(ErlDrvPort, char*, SysDriverOpts*);
-static void async_drv_stop(ErlDrvData);
-static void async_drv_input(ErlDrvData, ErlDrvEvent);
-
-/* INTERNAL use only */
-
-struct erl_drv_entry async_driver_entry = {
-    async_drv_init,
-    async_drv_start,
-    async_drv_stop,
-    NULL,
-    async_drv_input,
-    NULL,
-    "async",
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL
-};
-#endif
-
 /* Handle SIGCHLD signals. */
 #if (defined(SIG_SIGSET) || defined(SIG_SIGNAL))
 static RETSIGTYPE onchld(void)
@@ -1145,7 +1132,7 @@ static RETSIGTYPE onchld(int signum)
     smp_sig_notify('C');
 #else
     children_died = 1;
-    ERTS_CHK_IO_INTR(1); /* Make sure we don't sleep in poll */
+    ERTS_CHK_IO_AS_INTR(); /* Make sure we don't sleep in poll */
 #endif
 }
 
@@ -2316,87 +2303,6 @@ static void stop_select(ErlDrvEvent fd, void* _)
     close((int)fd);
 }
 
-/*
-** Async opertation support
-*/
-#if defined(USE_THREADS) && !defined(ERTS_SMP)
-static void
-sys_async_ready_failed(int fd, int r, int err)
-{
-    char buf[120];
-    sprintf(buf, "sys_async_ready(): Fatal error: fd=%d, r=%d, errno=%d\n",
-	     fd, r, err);
-    erts_silence_warn_unused_result(write(2, buf, strlen(buf)));
-    abort();
-}
-
-/* called from threads !! */
-void sys_async_ready(int fd)
-{
-    int r;
-    while (1) {
-	r = write(fd, "0", 1);  /* signal main thread fd MUST be async_fd[1] */
-	if (r == 1) {
-	    DEBUGF(("sys_async_ready(): r = 1\r\n"));
-	    break;
-	}
-	if (r < 0 && errno == EINTR) {
-	    DEBUGF(("sys_async_ready(): r = %d\r\n", r));
-	    continue;
-	}
-	sys_async_ready_failed(fd, r, errno);
-    }
-}
-
-static int async_drv_init(void)
-{
-    async_fd[0] = -1;
-    async_fd[1] = -1;
-    return 0;
-}
-
-static ErlDrvData async_drv_start(ErlDrvPort port_num,
-				  char* name, SysDriverOpts* opts)
-{
-    if (async_fd[0] != -1)
-	return ERL_DRV_ERROR_GENERAL;
-    if (pipe(async_fd) < 0)
-	return ERL_DRV_ERROR_GENERAL;
-
-    DEBUGF(("async_drv_start: %d\r\n", port_num));
-
-    SET_NONBLOCKING(async_fd[0]);
-    driver_select(port_num, async_fd[0], ERL_DRV_READ, 1);
-
-    if (init_async(async_fd[1]) < 0)
-	return ERL_DRV_ERROR_GENERAL;
-    return (ErlDrvData)port_num;
-}
-
-static void async_drv_stop(ErlDrvData e)
-{
-    int port_num = (int)(long)e;
-
-    DEBUGF(("async_drv_stop: %d\r\n", port_num));
-
-    exit_async();
-
-    driver_select(port_num, async_fd[0], ERL_DRV_READ, 0);
-
-    close(async_fd[0]);
-    close(async_fd[1]);
-    async_fd[0] = async_fd[1] = -1;
-}
-
-
-static void async_drv_input(ErlDrvData e, ErlDrvEvent fd)
-{
-    char *buf[32];
-    DEBUGF(("async_drv_input\r\n"));
-    while (read((int) fd, (void *) buf, 32) > 0); /* fd MUST be async_fd[0] */
-    check_async_ready();  /* invoke all async_ready */
-}
-#endif
 
 void erts_do_break_handling(void)
 {
@@ -2408,11 +2314,7 @@ void erts_do_break_handling(void)
      * therefore, make sure that all threads but this one are blocked before
      * proceeding!
      */
-    erts_smp_block_system(0);
-    /*
-     * NOTE: since we allow gc we are not allowed to lock
-     *       (any) process main locks while blocking system...
-     */
+    erts_smp_thr_progress_block();
 
     /* during break we revert to initial settings */
     /* this is done differently for oldshell */
@@ -2440,7 +2342,7 @@ void erts_do_break_handling(void)
       tcsetattr(0,TCSANOW,&temp_mode);
     }
 
-    erts_smp_release_system();
+    erts_smp_thr_progress_unblock();
 }
 
 /* Fills in the systems representation of the jam/beam process identifier.
@@ -2474,12 +2376,10 @@ erts_sys_putenv(char *buffer, int sep_ix)
 }
 
 int
-erts_sys_getenv(char *key, char *value, size_t *size)
+erts_sys_getenv__(char *key, char *value, size_t *size)
 {
-    char *orig_value;
     int res;
-    erts_smp_rwmtx_rlock(&environ_rwmtx);
-    orig_value = getenv(key);
+    char *orig_value = getenv(key);
     if (!orig_value)
 	res = -1;
     else {
@@ -2494,6 +2394,15 @@ erts_sys_getenv(char *key, char *value, size_t *size)
 	    res = 0;
 	}
     }
+    return res;
+}
+
+int
+erts_sys_getenv(char *key, char *value, size_t *size)
+{
+    int res;
+    erts_smp_rwmtx_rlock(&environ_rwmtx);
+    res = erts_sys_getenv__(key, value, size);
     erts_smp_rwmtx_runlock(&environ_rwmtx);
     return res;
 }
@@ -2505,31 +2414,6 @@ sys_init_io(void)
 	erts_alloc(ERTS_ALC_T_FD_TAB, max_files * sizeof(struct fd_data));
     erts_smp_atomic_add_nob(&sys_misc_mem_sz,
 			    max_files * sizeof(struct fd_data));
-
-#ifdef USE_THREADS
-#ifdef ERTS_SMP
-    if (init_async(-1) < 0)
-	erl_exit(1, "Failed to initialize async-threads\n");
-#else
-    {
-	/* This is speical stuff, starting a driver from the 
-	 * system routines, but is a nice way of handling stuff
-	 * the erlang way
-	 */
-	SysDriverOpts dopts;
-	int ret;
-
-	sys_memset((void*)&dopts, 0, sizeof(SysDriverOpts));
-	add_driver_entry(&async_driver_entry);
-	ret = erts_open_driver(NULL, NIL, "async", &dopts, NULL);
-	DEBUGF(("open_driver = %d\n", ret));
-	if (ret < 0)
-	    erl_exit(1, "Failed to open async driver\n");
-	erts_port[ret].status |= ERTS_PORT_SFLG_IMMORTAL;
-    }
-#endif
-#endif
-
 }
 
 #if (0) /* unused? */
@@ -2756,15 +2640,7 @@ initiate_report_exit_status(ErtsSysReportExit *rep, int status)
     rep->next = report_exit_transit_list;
     rep->status = status;
     report_exit_transit_list = rep;
-    /*
-     * We need the scheduler thread to call check_children().
-     * If the scheduler thread is sleeping in a poll with a
-     * timeout, we need to wake the scheduler thread. We use the
-     * functionality of the async driver to do this, instead of
-     * implementing yet another driver doing the same thing. A
-     * little bit ugly, but it works...
-     */
-    sys_async_ready(async_fd[1]);
+    erts_sys_schedule_interrupt(1);
 }
 
 static int check_children(void)
@@ -2851,20 +2727,11 @@ erl_sys_schedule(int runnable)
 {
 #ifdef ERTS_SMP
     ERTS_CHK_IO(!runnable);
-    ERTS_SMP_LC_ASSERT(!ERTS_LC_IS_BLOCKING);
 #else
-    ERTS_CHK_IO_INTR(0);
-    if (runnable) {
-	ERTS_CHK_IO(0);		/* Poll for I/O */
-	check_async_ready();	/* Check async completions */
-    } else {
-	int wait_for_io = !check_async_ready();
-	if (wait_for_io)
-	    wait_for_io = !check_children();
-	ERTS_CHK_IO(wait_for_io);
-    }
-    (void) check_children();
+    ERTS_CHK_IO(runnable ? 0 : !check_children());
 #endif
+    ERTS_SMP_LC_ASSERT(!erts_thr_progress_is_blocking());
+    (void) check_children();
 }
 
 
@@ -2892,8 +2759,8 @@ smp_sig_notify(char c)
 static void *
 signal_dispatcher_thread_func(void *unused)
 {
-    int initialized = 0;
 #if !CHLDWTHR
+    int initialized = 0;
     int notify_check_children = 0;
 #endif
 #ifdef ERTS_ENABLE_LOCK_CHECK
@@ -2921,20 +2788,20 @@ signal_dispatcher_thread_func(void *unused)
 	     *         to other threads.
 	     *
 	     * NOTE 2: The signal dispatcher thread is not a blockable
-	     *         thread (i.e., it hasn't called 
-	     *         erts_register_blockable_thread()). This is
-	     *         intentional. We want to be able to interrupt
-	     *         writing of a crash dump by hitting C-c twice.
-	     *         Since it isn't a blockable thread it is important
-	     *         that it doesn't change the state of any data that
-	     *         a blocking thread expects to have exclusive access
-	     *         to (unless the signal dispatcher itself explicitly
-	     *         is blocking all blockable threads).
+	     *         thread (i.e., not a thread managed by the
+	     *         erl_thr_progress module). This is intentional.
+	     *         We want to be able to interrupt writing of a crash
+	     *         dump by hitting C-c twice. Since it isn't a
+	     *         blockable thread it is important that it doesn't
+	     *         change the state of any data that a blocking thread
+	     *         expects to have exclusive access to (unless the
+	     *         signal dispatcher itself explicitly is blocking all
+	     *         blockable threads).
 	     */
 	    switch (buf[i]) {
 	    case 0: /* Emulator initialized */
-		initialized = 1;
 #if !CHLDWTHR
+		initialized = 1;
 		if (!notify_check_children)
 #endif
 		    break;
@@ -2969,7 +2836,7 @@ signal_dispatcher_thread_func(void *unused)
 			 buf[i]);
 	    }
 	}
-	ERTS_SMP_LC_ASSERT(!ERTS_LC_IS_BLOCKING);
+	ERTS_SMP_LC_ASSERT(!erts_thr_progress_is_blocking());
     }
     return NULL;
 }

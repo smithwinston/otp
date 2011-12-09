@@ -36,6 +36,7 @@
 -define(LONG_TIMEOUT, 600000).
 -define(EXPIRE, 10).
 -define(SLEEP, 500).
+-define(RENEGOTIATION_DISABLE_TIME, 12000).
 
 %% Test server callback functions
 %%--------------------------------------------------------------------
@@ -256,7 +257,9 @@ all() ->
      %%different_ca_peer_sign,
      no_reuses_session_server_restart_new_cert,
      no_reuses_session_server_restart_new_cert_file, reuseaddr,
-     hibernate, connect_twice
+     hibernate, connect_twice, renegotiate_dos_mitigate_active,
+     renegotiate_dos_mitigate_passive,
+     tcp_error_propagation_in_active_mode, rizzo, no_rizzo_rc4
     ].
 
 groups() -> 
@@ -393,8 +396,8 @@ controlling_process(Config) when is_list(Config) ->
     ClientOpts = ?config(client_opts, Config),
     ServerOpts = ?config(server_opts, Config),
     {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
-    ClientMsg = "Hello server",
-    ServerMsg = "Hello client",
+    ClientMsg = "Server hello",
+    ServerMsg = "Client hello",
    
     Server = ssl_test_lib:start_server([{node, ServerNode}, {port, 0}, 
 					{from, self()}, 
@@ -415,11 +418,15 @@ controlling_process(Config) when is_list(Config) ->
 		       [self(), Client, Server]),
     
     receive 
+	{ssl, _, "S"} ->
+	    receive_s_rizzo_duong_beast();
 	{ssl, _, ServerMsg} ->
 	    receive 
 		{ssl, _, ClientMsg} ->
 		    ok
 	    end;
+	{ssl, _, "C"} ->
+	    receive_c_rizzo_duong_beast();
 	{ssl, _, ClientMsg} ->
 	      receive 
 		  {ssl, _, ServerMsg} ->
@@ -440,6 +447,28 @@ controlling_process_result(Socket, Pid, Msg) ->
     ssl:send(Socket, Msg),
     no_result_msg.
 
+receive_s_rizzo_duong_beast() ->
+    receive 
+	{ssl, _, "erver hello"} ->
+	    receive 
+		{ssl, _, "C"} ->
+		    receive
+			{ssl, _, "lient hello"} ->
+			    ok
+		    end
+	    end
+    end.
+receive_c_rizzo_duong_beast() ->
+    receive 
+	{ssl, _, "lient hello"} ->
+	    receive
+		{ssl, _, "S"} ->
+		    receive
+			{ssl, _, "erver hello"} ->
+			    ok
+		    end
+	    end
+    end.
 %%--------------------------------------------------------------------
 controller_dies(doc) -> 
     ["Test that the socket is closed after controlling process dies"];
@@ -1231,6 +1260,11 @@ upgrade_result(Socket) ->
     %% Make sure binary is inherited from tcp socket and that we do
     %% not get the list default!
     receive 
+	{ssl, _, <<"H">>} ->
+	    receive 
+		{ssl, _, <<"ello world">>} ->
+		    ok
+	    end;
 	{ssl, _, <<"Hello world">>}  ->
 	    ok
     end.
@@ -1532,14 +1566,14 @@ eoptions(Config) when is_list(Config) ->
 		{cacertfile, ""}, 
 		{dhfile,'dh.pem' },
 		{ciphers, [{foo, bar, sha, ignore}]},
-		{reuse_session, foo}, 
-		{reuse_sessions, 0}, 
+		{reuse_session, foo},
+		{reuse_sessions, 0},
 		{renegotiate_at, "10"},
-		{debug, 1}, 
+		{debug, 1},
 		{mode, depech},
-		{packet, 8.0}, 
-		{packet_size, "2"}, 
-		{header, a}, 
+		{packet, 8.0},
+		{packet_size, "2"},
+		{header, a},
 		{active, trice},
 		{key, 'key.pem' }],
 
@@ -2313,8 +2347,8 @@ server_verify_client_once_passive(Config) when is_list(Config) ->
 					{options, [{active, false} | ClientOpts]}]),
     
     ssl_test_lib:check_result(Server, ok, Client0, ok),
-    ssl_test_lib:close(Client0),
     Server ! {listen, {mfa, {ssl_test_lib, no_result, []}}},
+    ssl_test_lib:close(Client0),
     Client1 = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
 					{host, Hostname},
 					{from, self()}, 
@@ -2340,7 +2374,7 @@ server_verify_client_once_active(Config) when is_list(Config) ->
     Server = ssl_test_lib:start_server([{node, ServerNode}, {port, 0}, 
 					{from, self()}, 
 					{mfa, {?MODULE, send_recv_result_active, []}},
-					{options, [{active, once}, {verify, verify_peer},
+					{options, [{active, true}, {verify, verify_peer},
 						   {verify_client_once, true}
 						   | ServerOpts]}]),
     Port  = ssl_test_lib:inet_port(Server),
@@ -2351,8 +2385,8 @@ server_verify_client_once_active(Config) when is_list(Config) ->
 					 {options, [{active, true} | ClientOpts]}]),
     
     ssl_test_lib:check_result(Server, ok, Client0, ok),
-    ssl_test_lib:close(Client0),
     Server ! {listen, {mfa, {ssl_test_lib, no_result, []}}},
+    ssl_test_lib:close(Client0),
     Client1 = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
 					{host, Hostname},
 					{from, self()}, 
@@ -2389,8 +2423,8 @@ server_verify_client_once_active_once(Config) when is_list(Config) ->
 					{options, [{active, once} | ClientOpts]}]),
     
     ssl_test_lib:check_result(Server, ok, Client0, ok),
-    ssl_test_lib:close(Client0),
     Server ! {listen, {mfa, {ssl_test_lib, no_result, []}}},
+    ssl_test_lib:close(Client0),
     Client1 = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
 					 {host, Hostname},
 					 {from, self()},
@@ -2592,7 +2626,7 @@ client_renegotiate(Config) when is_list(Config) ->
 				   {options, ServerOpts}]),
     Port = ssl_test_lib:inet_port(Server),
  
-    Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
+    Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port},
 					{host, Hostname},
 					{from, self()}, 
 					{mfa, {?MODULE, 
@@ -2724,17 +2758,28 @@ client_no_wrap_sequence_number(Config) when is_list(Config) ->
 				   {options, ServerOpts}]),
     Port = ssl_test_lib:inet_port(Server),
  
+    Version = ssl_record:highest_protocol_version(ssl_record:supported_protocol_versions()),
+
     Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
 					{host, Hostname},
 					{from, self()}, 
 					{mfa, {ssl_test_lib, 
-					       trigger_renegotiate, [[ErlData, N+2]]}},
+					       trigger_renegotiate, [[ErlData, treashold(N, Version)]]}},
 					{options, [{reuse_sessions, false},
 						   {renegotiate_at, N} | ClientOpts]}]),
     
     ssl_test_lib:check_result(Client, ok), 
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
+
+ %% First two clauses handles 1/n-1 splitting countermeasure Rizzo/Duong-Beast
+treashold(N, {3,0}) ->
+    (N div 2) + 1;
+treashold(N, {3,1}) ->
+    (N div 2) + 1;
+treashold(N, _) ->
+    N + 1.
+    
 %%--------------------------------------------------------------------
 server_no_wrap_sequence_number(doc) -> 
     ["Test that erlang server will renegotiate session when",  
@@ -2784,7 +2829,7 @@ extended_key_usage_verify_peer(Config) when is_list(Config) ->
    
     KeyFile = filename:join(PrivDir, "otpCA/private/key.pem"), 
     [KeyEntry] = ssl_test_lib:pem_to_der(KeyFile),
-    Key = public_key:pem_entry_decode(KeyEntry),
+    Key = ssl_test_lib:public_key(public_key:pem_entry_decode(KeyEntry)),
 
     ServerCertFile = proplists:get_value(certfile, ServerOpts),
     NewServerCertFile = filename:join(PrivDir, "server/new_cert.pem"),
@@ -2846,7 +2891,7 @@ extended_key_usage_verify_none(Config) when is_list(Config) ->
 
     KeyFile = filename:join(PrivDir, "otpCA/private/key.pem"),
     [KeyEntry] = ssl_test_lib:pem_to_der(KeyFile),
-    Key = public_key:pem_entry_decode(KeyEntry),
+    Key = ssl_test_lib:public_key(public_key:pem_entry_decode(KeyEntry)),
 
     ServerCertFile = proplists:get_value(certfile, ServerOpts),
     NewServerCertFile = filename:join(PrivDir, "server/new_cert.pem"),
@@ -2908,7 +2953,7 @@ no_authority_key_identifier(Config) when is_list(Config) ->
    
     KeyFile = filename:join(PrivDir, "otpCA/private/key.pem"),
     [KeyEntry] = ssl_test_lib:pem_to_der(KeyFile),
-    Key = public_key:pem_entry_decode(KeyEntry),
+    Key = ssl_test_lib:public_key(public_key:pem_entry_decode(KeyEntry)),
 
     CertFile = proplists:get_value(certfile, ServerOpts),
     NewCertFile = filename:join(PrivDir, "server/new_cert.pem"),
@@ -2966,7 +3011,7 @@ invalid_signature_server(Config) when is_list(Config) ->
    
     KeyFile = filename:join(PrivDir, "server/key.pem"),
     [KeyEntry] = ssl_test_lib:pem_to_der(KeyFile),
-    Key = public_key:pem_entry_decode(KeyEntry),
+    Key = ssl_test_lib:public_key(public_key:pem_entry_decode(KeyEntry)),
 
     ServerCertFile = proplists:get_value(certfile, ServerOpts),
     NewServerCertFile = filename:join(PrivDir, "server/invalid_cert.pem"),
@@ -2988,8 +3033,8 @@ invalid_signature_server(Config) when is_list(Config) ->
 					      {from, self()}, 
 					      {options, [{verify, verify_peer} | ClientOpts]}]),
     
-    ssl_test_lib:check_result(Server, {error, "bad certificate"}, 
-			      Client, {error,"bad certificate"}).
+    tcp_delivery_workaround(Server, {error, "bad certificate"},
+			    Client, {error,"bad certificate"}).
     
 %%--------------------------------------------------------------------
 
@@ -3006,7 +3051,7 @@ invalid_signature_client(Config) when is_list(Config) ->
    
     KeyFile = filename:join(PrivDir, "client/key.pem"),
     [KeyEntry] = ssl_test_lib:pem_to_der(KeyFile),
-    Key = public_key:pem_entry_decode(KeyEntry),
+    Key = ssl_test_lib:public_key(public_key:pem_entry_decode(KeyEntry)),
 
     ClientCertFile = proplists:get_value(certfile, ClientOpts),
     NewClientCertFile = filename:join(PrivDir, "client/invalid_cert.pem"),
@@ -3034,41 +3079,47 @@ invalid_signature_client(Config) when is_list(Config) ->
 tcp_delivery_workaround(Server, ServerMsg, Client, ClientMsg) ->
     receive 
 	{Server, ServerMsg} ->
-	    receive 
-		{Client, ClientMsg} ->
-		    ok;
-		{Client, {error,closed}} ->
-		    test_server:format("client got close");
-		Unexpected ->
-		    test_server:fail(Unexpected) 
-	    end;
+	    client_msg(Client, ClientMsg);
 	{Client, ClientMsg} ->
-	    receive 
-		{Server, ServerMsg} ->
-		    ok;
-		Unexpected ->
-		    test_server:fail(Unexpected) 
-	    end;
+	    server_msg(Server, ServerMsg);
        	{Client, {error,closed}} ->
-	    receive 
-		{Server, ServerMsg} ->
-		    ok;
-		Unexpected ->
-		    test_server:fail(Unexpected) 
-	    end;
+	    server_msg(Server, ServerMsg);
 	{Server, {error,closed}} ->
-	    receive 
-		{Client, ClientMsg} ->
-		    ok;
-		{Client, {error,closed}} ->
-		    test_server:format("client got close"),
-		    ok;
-		Unexpected ->
-		    test_server:fail(Unexpected) 
-	    end;
+	    client_msg(Client, ClientMsg);
+	{Client, {error, esslconnect}} ->
+	    server_msg(Server, ServerMsg);
+	{Server, {error, esslaccept}} ->
+	    client_msg(Client, ClientMsg)
+    end.
+
+client_msg(Client, ClientMsg) ->
+    receive
+	{Client, ClientMsg} ->
+	    ok;
+	{Client, {error,closed}} ->
+	    test_server:format("client got close"),
+	    ok;
+	{Client, {error, esslconnect}} ->
+	    test_server:format("client got econnaborted"),
+	    ok;
 	Unexpected ->
 	    test_server:fail(Unexpected)
     end.
+
+server_msg(Server, ServerMsg) ->
+    receive
+	{Server, ServerMsg} ->
+	    ok;
+	{Server, {error,closed}} ->
+	    test_server:format("server got close"),
+	    ok;
+	{Server, {error, esslaccept}} ->
+	    test_server:format("server got econnaborted"),
+	    ok;
+	Unexpected ->
+	    test_server:fail(Unexpected)
+    end.
+
 %%--------------------------------------------------------------------
 cert_expired(doc) -> 
     ["Test server with invalid signature"];
@@ -3083,7 +3134,7 @@ cert_expired(Config) when is_list(Config) ->
    
     KeyFile = filename:join(PrivDir, "otpCA/private/key.pem"),
     [KeyEntry] = ssl_test_lib:pem_to_der(KeyFile),
-    Key = public_key:pem_entry_decode(KeyEntry),
+    Key = ssl_test_lib:public_key(public_key:pem_entry_decode(KeyEntry)),
 
     ServerCertFile = proplists:get_value(certfile, ServerOpts),
     NewServerCertFile = filename:join(PrivDir, "server/expired_cert.pem"),
@@ -3358,14 +3409,14 @@ der_input_opts(Opts) ->
     Keyfile = proplists:get_value(keyfile, Opts),
     Dhfile = proplists:get_value(dhfile, Opts),
     [{_, Cert, _}] = ssl_test_lib:pem_to_der(Certfile),
-    [{_, Key, _}]  = ssl_test_lib:pem_to_der(Keyfile),
+    [{Asn1Type, Key, _}]  = ssl_test_lib:pem_to_der(Keyfile),
     [{_, DHParams, _}]  = ssl_test_lib:pem_to_der(Dhfile),
     CaCerts =
 	lists:map(fun(Entry) ->
 			  {_, CaCert, _} = Entry,
 			  CaCert
 		  end, ssl_test_lib:pem_to_der(CaCertsfile)),
-    {Cert, {rsa, Key}, CaCerts, DHParams}.
+    {Cert, {Asn1Type, Key}, CaCerts, DHParams}.
 
 %%--------------------------------------------------------------------
 %% different_ca_peer_sign(doc) ->
@@ -3588,14 +3639,13 @@ hibernate(Config) ->
 					{from, self()},
 					{mfa, {?MODULE, send_recv_result_active, []}},
 					{options, [{hibernate_after, 1000}|ClientOpts]}]),
-
-    { current_function, { _M, _F, _A } } =
+    {current_function, _} =
         process_info(Pid, current_function),
 
     timer:sleep(1100),
 
-    { current_function, { erlang, hibernate, 3} } =
-        process_info(Pid, current_function),
+    {current_function, {erlang, hibernate, 3}} =
+	process_info(Pid, current_function),
 
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -3647,6 +3697,166 @@ connect_twice(Config) when is_list(Config) ->
     ssl_test_lib:close(Client),
     ssl_test_lib:close(Client1).
 
+%%--------------------------------------------------------------------
+renegotiate_dos_mitigate_active(doc) ->
+    ["Mitigate DOS computational attack by not allowing client to renegotiate many times in a row",
+    "immediately after each other"];
+
+renegotiate_dos_mitigate_active(suite) ->
+    [];
+
+renegotiate_dos_mitigate_active(Config) when is_list(Config) ->
+    ServerOpts = ?config(server_opts, Config),
+    ClientOpts = ?config(client_opts, Config),
+
+    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
+
+    Server =
+	ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
+				   {from, self()},
+				   {mfa, {?MODULE, send_recv_result_active, []}},
+				   {options, [ServerOpts]}]),
+    Port = ssl_test_lib:inet_port(Server),
+
+    Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port},
+					{host, Hostname},
+					{from, self()},
+					{mfa, {?MODULE,
+					       renegotiate_immediately, []}},
+					{options, ClientOpts}]),
+
+    ssl_test_lib:check_result(Client, ok, Server, ok),
+    ssl_test_lib:close(Server),
+    ssl_test_lib:close(Client).
+
+%%--------------------------------------------------------------------
+renegotiate_dos_mitigate_passive(doc) ->
+    ["Mitigate DOS computational attack by not allowing client to renegotiate many times in a row",
+    "immediately after each other"];
+
+renegotiate_dos_mitigate_passive(suite) ->
+    [];
+
+renegotiate_dos_mitigate_passive(Config) when is_list(Config) ->
+    ServerOpts = ?config(server_opts, Config),
+    ClientOpts = ?config(client_opts, Config),
+
+    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
+
+    Server =
+	ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
+				   {from, self()},
+				   {mfa, {?MODULE, send_recv_result, []}},
+				   {options, [{active, false} | ServerOpts]}]),
+    Port = ssl_test_lib:inet_port(Server),
+ 
+    Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port},
+					{host, Hostname},
+					{from, self()}, 
+					{mfa, {?MODULE, 
+					       renegotiate_immediately, []}},
+					{options, ClientOpts}]),
+    
+    ssl_test_lib:check_result(Client, ok, Server, ok), 
+    ssl_test_lib:close(Server),
+    ssl_test_lib:close(Client).
+
+%%--------------------------------------------------------------------
+tcp_error_propagation_in_active_mode(doc) ->
+    ["Test that process recives {ssl_error, Socket, closed} when tcp error ocurres"];
+tcp_error_propagation_in_active_mode(Config) when is_list(Config) ->
+    ClientOpts = ?config(client_opts, Config),
+    ServerOpts = ?config(server_opts, Config),
+
+    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
+
+    Server  = ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
+					  {from, self()},
+					  {mfa, {ssl_test_lib, no_result, []}},
+					  {options, ServerOpts}]),
+    Port = ssl_test_lib:inet_port(Server),
+    {Client, #sslsocket{pid=Pid} = SslSocket} = ssl_test_lib:start_client([return_socket,
+							       {node, ClientNode}, {port, Port},
+							       {host, Hostname},
+							       {from, self()},
+							       {mfa, {?MODULE, receive_msg, []}},
+							       {options, ClientOpts}]),
+
+    {status, _, _, StatusInfo} = sys:get_status(Pid),
+    [_, _,_, _, Prop] = StatusInfo,
+    State = ssl_test_lib:state(Prop),
+    Socket = element(10, State),
+
+    %% Fake tcp error
+    Pid ! {tcp_error, Socket, etimedout},
+
+    ssl_test_lib:check_result(Client, {ssl_closed, SslSocket}).
+%%--------------------------------------------------------------------
+
+rizzo(doc) -> ["Test that there is a 1/n-1-split for non RC4 in 'TLS < 1.1' as it is
+    vunrable to Rizzo/Dungon attack"];
+
+rizzo(Config) when is_list(Config) ->
+    Ciphers  = [X || X ={_,Y,_} <- ssl:cipher_suites(), Y  =/= rc4_128],
+    run_send_recv_rizzo(Ciphers, Config, sslv3,
+			 {?MODULE, send_recv_result_active_rizzo, []}),
+    run_send_recv_rizzo(Ciphers, Config, tlsv1,
+			 {?MODULE, send_recv_result_active_rizzo, []}).
+
+no_rizzo_rc4(doc) -> 
+    ["Test that there is no 1/n-1-split for RC4 as it is not vunrable to Rizzo/Dungon attack"];
+
+no_rizzo_rc4(Config) when is_list(Config) ->
+    Ciphers = [X || X ={_,Y,_} <- ssl:cipher_suites(),Y == rc4_128],
+    run_send_recv_rizzo(Ciphers, Config, sslv3,
+			{?MODULE, send_recv_result_active_no_rizzo, []}),
+    run_send_recv_rizzo(Ciphers, Config, tlsv1,
+			{?MODULE, send_recv_result_active_no_rizzo, []}).
+
+run_send_recv_rizzo(Ciphers, Config, Version, Mfa) ->
+    Result =  lists:map(fun(Cipher) -> 
+				rizzo_test(Cipher, Config, Version, Mfa) end,
+			Ciphers),
+    case lists:flatten(Result) of
+	[] ->
+	    ok;
+	Error ->
+	    test_server:format("Cipher suite errors: ~p~n", [Error]),
+	    test_server:fail(cipher_suite_failed_see_test_case_log) 
+    end.
+
+rizzo_test(Cipher, Config, Version, Mfa) ->
+   {ClientOpts, ServerOpts} = client_server_opts(Cipher, Config),
+    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
+    Server = ssl_test_lib:start_server([{node, ServerNode}, {port, 0}, 
+					{from, self()}, 
+			   {mfa, Mfa},
+			   {options, [{active, true}, {ciphers, [Cipher]},
+				       {versions, [Version]}
+				      | ServerOpts]}]),
+    Port  = ssl_test_lib:inet_port(Server),
+    Client = ssl_test_lib:start_client([{node, ClientNode}, {port, Port}, 
+					{host, Hostname},
+			   {from, self()}, 
+			   {mfa, Mfa},
+			   {options, [{active, true} | ClientOpts]}]),
+    
+    Result = ssl_test_lib:check_result(Server, ok, Client, ok),
+    ssl_test_lib:close(Server),
+    ssl_test_lib:close(Client),
+    case Result of
+	ok ->
+	    [];
+	Error ->
+	    [{Cipher, Error}]
+    end.
+
+client_server_opts({KeyAlgo,_,_}, Config) when KeyAlgo == rsa orelse KeyAlgo == dhe_rsa ->
+    {?config(client_opts, Config),
+     ?config(server_opts, Config)};   
+client_server_opts({KeyAlgo,_,_}, Config) when KeyAlgo == dss orelse KeyAlgo == dhe_dss ->
+    {?config(client_dsa_opts, Config),
+     ?config(server_dsa_opts, Config)}.
 
 %%--------------------------------------------------------------------
 %%% Internal functions
@@ -3659,6 +3869,28 @@ send_recv_result(Socket) ->
 send_recv_result_active(Socket) ->
     ssl:send(Socket, "Hello world"),
     receive 
+	{ssl, Socket, "H"} ->
+	    receive 
+		{ssl, Socket, "ello world"} ->
+		    ok
+	    end;
+	{ssl, Socket, "Hello world"} ->
+	    ok
+    end.
+
+send_recv_result_active_rizzo(Socket) ->
+    ssl:send(Socket, "Hello world"),
+    receive 
+	{ssl, Socket, "H"} ->
+	    receive 
+		{ssl, Socket, "ello world"} ->
+		    ok
+	    end
+    end.
+
+send_recv_result_active_no_rizzo(Socket) ->
+    ssl:send(Socket, "Hello world"),
+    receive 
 	{ssl, Socket, "Hello world"} ->
 	    ok
     end.
@@ -3666,6 +3898,12 @@ send_recv_result_active(Socket) ->
 send_recv_result_active_once(Socket) ->
     ssl:send(Socket, "Hello world"),
     receive 
+	{ssl, Socket, "H"} ->
+	    ssl:setopts(Socket, [{active, once}]),
+	    receive 
+		{ssl, Socket, "ello world"} ->
+		    ok
+	    end;
 	{ssl, Socket, "Hello world"} ->
 	    ok
     end.
@@ -3690,6 +3928,25 @@ renegotiate_reuse_session(Socket, Data) ->
     test_server:sleep(?SLEEP),
     renegotiate(Socket, Data).
 
+renegotiate_immediately(Socket) ->
+    receive 
+	{ssl, Socket, "Hello world"} ->
+	    ok;
+	%% Handle 1/n-1 splitting countermeasure Rizzo/Duong-Beast
+	{ssl, Socket, "H"} ->
+	    receive 
+		{ssl, Socket, "ello world"} ->
+		    ok
+	    end
+    end,
+    ok = ssl:renegotiate(Socket),  
+    {error, renegotiation_rejected} = ssl:renegotiate(Socket),
+    test_server:sleep(?RENEGOTIATION_DISABLE_TIME +1),
+    ok = ssl:renegotiate(Socket),
+    test_server:format("Renegotiated again"),
+    ssl:send(Socket, "Hello world"),
+    ok.
+    
 new_config(PrivDir, ServerOpts0) ->
     CaCertFile = proplists:get_value(cacertfile, ServerOpts0),
     CertFile = proplists:get_value(certfile, ServerOpts0),
@@ -3863,8 +4120,17 @@ erlang_ssl_receive(Socket, Data) ->
 	{ssl, Socket, Data} ->
 	    io:format("Received ~p~n",[Data]),
 	    ok;
+	{ssl, Socket, Byte} when length(Byte) == 1 ->  %% Handle 1/n-1 splitting countermeasure Rizzo/Duong-Beast
+	    io:format("Received ~p~n",[Byte]),
+	    erlang_ssl_receive(Socket, tl(Data));
 	Other ->
 	    test_server:fail({unexpected_message, Other})
     after ?SLEEP * 3 ->
 	    test_server:fail({did_not_get, Data})
+    end.
+
+receive_msg(_) ->
+    receive
+	Msg ->
+	   Msg
     end.

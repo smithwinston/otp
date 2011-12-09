@@ -35,6 +35,100 @@
   <section><title>Inets 5.8</title>
 
     <section><title>Improvements and New Features</title>
+<!--
+    <p>-</p>
+-->
+
+      <list>
+        <item>
+          <p>[ftpc] Add a config option to specify a 
+	  <seealso marker="ftp#dtimeout">data connect timeout</seealso>.
+	  That is how long the ftp client will wait for the server to connect
+	  to the data socket. If this timeout occurs, an error will be 
+	  returned to the caller and the ftp client process will be 
+	  terminated. </p>
+	  <p>Own Id: OTP-9545</p>
+        </item>
+
+        <item>
+          <p>[httpc] Wrong Host header in IPv6 HTTP requests.
+	  When a URI with a IPv6 host is parsed, the brackets that encapsulates
+	  the address part is removed. This value is then supplied as the host 
+	  header. This can cause problems with some servers.
+	  A workaround for this is to use headers_as_is and provide the host
+	  header with the requst call. 
+	  To solve this a new option has been added, 
+	  <seealso marker="httpc#ipv6_host_with_brackets">ipv6_host_with_brackets</seealso>. 
+	  This option specifies if the host value of the host header shall 
+	  include the brackets or not. By default, it does not (as before). 
+	  </p>
+	  <p>Own Id: OTP-9628</p>
+        </item>
+
+      </list>
+
+    </section>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+<!--
+    <p>-</p>
+-->
+
+      <list>
+        <item>
+          <p>[httpd] Fix logging of content length in mod_log. </p>
+	  <p>Garrett Smith</p>
+	  <p>Own Id: OTP-9715</p>
+        </item>
+
+        <item>
+          <p>[httpd] Sometimes entries in the transfer log was written 
+	  with the message size as list of numbers. This list was actually 
+	  the size as a string, e.g. "123", written with the control 
+	  sequence ~w. This has now been corrected so that any string is 
+	  converted to an integer (if possible). </p>
+	  <p>Own Id: OTP-9733</p>
+        </item>
+
+        <item>
+          <p>Fixed various problems detected by Dialyzer. </p>
+	  <p>Own Id: OTP-9736</p>
+        </item>
+
+      </list>
+
+    </section>
+
+    <section>
+      <title>Incompatibilities</title>
+<!--
+      <p>-</p>
+-->
+
+      <list>
+        <item>
+          <p>[httpc] Deprecated interface module <c>http</c> has been removed. 
+	  It has (long) been replaced by http client interface module 
+	  <seealso marker="httpc#">httpc</seealso>. </p>
+	  <p>Own Id: OTP-9359</p>
+        </item>
+
+        <item>
+          <p>[httpc|httpd] The old ssl implementation (based on OpenSSL), 
+	  has been deprecated. The config option that specified usage of 
+	  this version of the ssl app, <c>ossl</c>, has been removed. </p>
+	  <p>Own Id: OTP-9522</p>
+        </item>
+
+      </list>
+
+    </section>
+
+  </section> <!-- 5.8 -->
+
+  
+  <section><title>Inets 5.7.2</title>
+    <section><title>Improvements and New Features</title>
     <p>-</p>
 
 <!--
@@ -42,23 +136,6 @@
         <item>
           <p>[httpc|httpd] Added support for IPv6 with ssl. </p>
 	  <p>Own Id: OTP-5566</p>
-        </item>
-
-      </list>
--->
-
-    </section>
-
-    <section><title>Fixed Bugs and Malfunctions</title>
-    <p>-</p>
-
-<!--
-      <list>
-        <item>
-          <p>[httpc] Remove unnecessary usage of iolist_to_binary when 
-	  processing body (for PUT and POST). </p>
-	  <p>Filipe David Manana</p>
-	  <p>Own Id: OTP-9317</p>
         </item>
 
       </list>
@@ -91,9 +168,31 @@
 
     </section>
 
-  </section> <!-- 5.8 -->
+    <section><title>Fixed Bugs and Malfunctions</title>
+<!--
+    <p>-</p>
+-->
 
+      <list>
+        <item>
+          <p>[httpd] XSS prevention did not work for hex-encoded URL's. </p>
+          <p>Own Id: OTP-9655</p>
+        </item>
+
+        <item>
+          <p>[httpd] GET request with malformed header date caused 
+	  server crash (non-fatal) with no reply to client. Will
+	  now result in a reply with status code 400. </p>
+          <p>Own Id: OTP-9674</p>
+          <p>Aux Id: seq11936</p>
+        </item>
+
+      </list>
+    </section>
   
+  </section> <!-- 5.7.2 -->
+
+
   <section><title>Inets 5.7.1</title>
 
     <section><title>Improvements and New Features</title>

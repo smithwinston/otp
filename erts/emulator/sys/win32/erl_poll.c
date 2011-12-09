@@ -442,8 +442,8 @@ poll_wait_timeout(ErtsPollSet ps, SysTimeval *tvp)
     if (erts_atomic32_read_nob(&ps->wakeup_state) != ERTS_POLL_NOT_WOKEN)
 	return (DWORD) 0;
 
-    if (timeout > ERTS_AINT32_T_MAX) /* Also prevents DWORD overflow */
-	timeout = ERTS_AINT32_T_MAX;
+    if (timeout > ((time_t) ERTS_AINT32_T_MAX))
+	timeout = ERTS_AINT32_T_MAX; /* Also prevents DWORD overflow */
 
     erts_smp_atomic32_set_relb(&ps->timeout, (erts_aint32_t) timeout);
     return (DWORD) timeout;
@@ -1012,7 +1012,7 @@ void  erts_poll_interrupt(ErtsPollSet ps, int set /* bool */)
 
 void erts_poll_interrupt_timed(ErtsPollSet ps,
 			       int set /* bool */,
-			       long msec)
+			       erts_short_time_t msec)
 {
     HARDTRACEF(("In erts_poll_interrupt_timed(%d,%ld)",set,msec));
     if (!set)
@@ -1159,7 +1159,13 @@ int erts_poll_wait(ErtsPollSet ps,
 
 	HARDDEBUGF(("Start waiting %d [%d]",num_h, (int) timeout));
 	ERTS_POLLSET_UNLOCK(ps);
+#ifdef ERTS_SMP
+	erts_thr_progress_prepare_wait(NULL);
+#endif
 	WaitForMultipleObjects(num_h, harr, FALSE, timeout);
+#ifdef ERTS_SMP
+	erts_thr_progress_finalize_wait(NULL);
+#endif
 	ERTS_POLLSET_LOCK(ps);
 	HARDDEBUGF(("Stop waiting %d [%d]",num_h, (int) timeout));
 	woke_up(ps);

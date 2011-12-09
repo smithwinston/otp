@@ -32,11 +32,6 @@
   <marker id="general"></marker>
   <section>
     <title>General</title>
-    <warning><p>This feature is in alpha release right now. This means that the 
-	interface may change in the future and that there may be bugs. We 
-	encourage you to use this feature, but be prepared 
-	that there might be bugs and that the interface might change
-	inbetween releases.</p></warning>
     <p>
       The <em>Common Test Hook</em> (henceforth called CTH) framework allows 
       extensions of the default behaviour of Common Test by means of hooks 
@@ -113,9 +108,10 @@
     </section>
    
     <section>
-      <title>CTH Priority</title>
+      <title>CTH Execution order</title>
       <p>By default each CTH installed will be executed in the order which
-      they are installed. This is not always wanted so common_test allows 
+      they are installed for init calls, and then reversed for end calls.
+      This is not always wanted so common_test allows
       the user to specify a priority for each hook. The priority can either
       be specified in the CTH <seealso marker="ct_hooks#Module:init-2">init/2
       </seealso> function or when installing the hook. The priority given at

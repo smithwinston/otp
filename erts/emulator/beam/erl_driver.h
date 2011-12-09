@@ -28,6 +28,14 @@
 #  include "config.h"
 #endif
 
+#define ERL_DRV_DEPRECATED_FUNC
+#ifdef __GNUC__
+#  if __GNUC__ >= 3
+#    undef ERL_DRV_DEPRECATED_FUNC
+#    define ERL_DRV_DEPRECATED_FUNC __attribute__((deprecated))
+#  endif
+#endif
+
 #ifdef SIZEOF_CHAR
 #  define SIZEOF_CHAR_SAVED__ SIZEOF_CHAR
 #  undef SIZEOF_CHAR
@@ -152,10 +160,15 @@ typedef struct {
 /*
  * Integer types
  */
-
+#if  defined(__WIN32__) && (SIZEOF_VOID_P == 8)
+typedef unsigned __int64 ErlDrvTermData;
+typedef unsigned __int64 ErlDrvUInt;
+typedef signed __int64 ErlDrvSInt;
+#else
 typedef unsigned long ErlDrvTermData;
 typedef unsigned long ErlDrvUInt;
 typedef signed long ErlDrvSInt;
+#endif
 
 #if defined(__WIN32__)
 typedef unsigned __int64 ErlDrvUInt64;
@@ -176,7 +189,7 @@ typedef long long ErlDrvSInt64;
  */
 
 typedef struct erl_drv_binary {
-    long orig_size;        /* total length of binary */
+    ErlDrvSInt orig_size;        /* total length of binary */
     char orig_bytes[1];   /* the data (char instead of byte!) */
 } ErlDrvBinary;
 
@@ -582,8 +595,11 @@ EXTERN long driver_async(ErlDrvPort ix,
 			 void* async_data,
 			 void (*async_free)(void*));
 
-
-EXTERN int driver_async_cancel(unsigned int key);
+/*
+ * driver_async_cancel() is deprecated. It is scheduled for removal
+ * in OTP-R16. For more information see the erl_driver(3) documentation.
+ */
+EXTERN int driver_async_cancel(unsigned int key) ERL_DRV_DEPRECATED_FUNC;
 
 /* Locks the driver in the machine "forever", there is
    no unlock function. Note that this is almost never useful, as an open

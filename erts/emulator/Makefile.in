@@ -198,6 +198,7 @@ RM	= @RM@
 MKDIR	= @MKDIR@
 
 USING_MINGW=@MIXED_CYGWIN_MINGW@
+MIXED_MSYS=@MIXED_MSYS@
 
 ifeq ($(TARGET),win32)
 LIB_PREFIX=
@@ -237,9 +238,12 @@ ifeq ($(TARGET), win32)
 GEN_OPT_FLGS = $(OPT_LEVEL)
 UNROLL_FLG = 
 RC=rc.sh
+ifeq ($(MIXED_MSYS), yes)
+MAKE_PRELOAD_EXTRA = -msys
+endif
 ifeq ($(USING_MINGW), yes)
-RES_EXT=@OBJEXT@
-MAKE_PRELOAD_EXTRA=-windres
+RES_EXT = @OBJEXT@
+MAKE_PRELOAD_EXTRA += " -windres"
 else
 RES_EXT=res
 endif
@@ -359,7 +363,6 @@ ERLANG_OSTYPE = @ERLANG_OSTYPE@
 
 ENABLE_ALLOC_TYPE_VARS += @ERLANG_OSTYPE@
 
-EMULATOR_EXECUTABLE_ELIB = beam.elib$(TF_MARKER)
 ifeq ($(TARGET), win32)
 EMULATOR_EXECUTABLE = beam$(TF_MARKER).dll
 else
@@ -721,7 +724,7 @@ RUN_OBJS = \
 	$(OBJDIR)/external.o		$(OBJDIR)/dist.o \
 	$(OBJDIR)/binary.o		$(OBJDIR)/erl_db.o \
 	$(OBJDIR)/erl_db_util.o		$(OBJDIR)/erl_db_hash.o \
-	$(OBJDIR)/erl_db_tree.o		$(OBJDIR)/fix_alloc.o \
+	$(OBJDIR)/erl_db_tree.o		$(OBJDIR)/erl_thr_progress.o \
 	$(OBJDIR)/big.o			$(OBJDIR)/hash.o \
 	$(OBJDIR)/index.o		$(OBJDIR)/atom.o \
 	$(OBJDIR)/module.o		$(OBJDIR)/export.o \
@@ -738,7 +741,8 @@ RUN_OBJS = \
 	$(OBJDIR)/erl_bif_re.o		$(OBJDIR)/erl_unicode.o \
 	$(OBJDIR)/packet_parser.o	$(OBJDIR)/safe_hash.o \
 	$(OBJDIR)/erl_zlib.o		$(OBJDIR)/erl_nif.o \
-	$(OBJDIR)/erl_bif_binary.o      $(OBJDIR)/erl_ao_firstfit_alloc.o
+	$(OBJDIR)/erl_bif_binary.o      $(OBJDIR)/erl_ao_firstfit_alloc.o \
+	$(OBJDIR)/erl_thr_queue.o	$(OBJDIR)/erl_sched_spec_pre_alloc.o
 
 ifeq ($(TARGET),win32)
 DRV_OBJS = \
@@ -941,7 +945,6 @@ $(TARGET)/Makefile: Makefile.in
 
 #SED_REPL_WIN_DRIVE=s|\([ 	]\)\([A-Za-z]\):|\1/cygdrive/\2|g;s|^\([A-Za-z]\):|/cygdrive/\1|g
 SED_REPL_O=s|^\([^:]*:\)|$$(OBJDIR)/\1|g
-SED_REPL_ELIB_O=s|^\([^:]*\).o[ 	]*:|$$(OBJDIR)/\1.elib.o:|g
 SED_REPL_TTF_DIR=s|$(TTF_DIR)/|$$(TTF_DIR)/|g
 SED_REPL_ERL_TOP=s|\([ 	]\)$(ERL_TOP)/|\1$$(ERL_TOP)/|g;s|^$(ERL_TOP)/|$$(ERL_TOP)/|g
 SED_REPL_POLL=s|$$(OBJDIR)/erl_poll.o|$$(OBJDIR)/erl_poll.kp.o $$(OBJDIR)/erl_poll.nkp.o|g
@@ -961,7 +964,6 @@ SED_SUFFIX=
 endif
 
 SED_DEPEND=sed '$(SED_PREFIX)$(SED_REPL_O);$(SED_REPL_TTF_DIR);$(SED_REPL_ERL_TOP)$(SED_SUFFIX)'
-SED_ELIB_DEPEND=sed '$(SED_PREFIX)$(SED_REPL_ELIB_O);$(SED_REPL_TTF_DIR);$(SED_REPL_ERL_TOP)$(SED_SUFFIX)'
 
 ifdef HIPE_ENABLED
 HIPE_SRC=$(wildcard hipe/*.c)
@@ -970,7 +972,8 @@ HIPE_SRC=
 endif
 
 BEAM_SRC=$(wildcard beam/*.c)
-DRV_SRC=$(wildcard drivers/common/*.c) $(wildcard drivers/$(ERLANG_OSTYPE)/*.c)
+DRV_COMMON_SRC=$(wildcard drivers/common/*.c)
+DRV_OSTYPE_SRC=$(wildcard drivers/$(ERLANG_OSTYPE)/*.c)
 ALL_SYS_SRC=$(wildcard sys/$(ERLANG_OSTYPE)/*.c) $(wildcard sys/common/*.c)
 TARGET_SRC=$(wildcard $(TARGET)/*.c) $(wildcard $(TTF_DIR)/*.c)
 
@@ -981,7 +984,7 @@ ifeq ($(TARGET),win32)
 
 #DEP_CC=$(EMU_CC)
 DEP_CC=$(CC)
-DEP_FLAGS=-MM  $(subst -O2,,$(CFLAGS)) $(INCLUDES) -I../etc/win32 -Idrivers/common
+DEP_FLAGS=-MM  $(subst -O2,,$(CFLAGS)) $(INCLUDES) -I../etc/win32 -Idrivers/common -Idrivers/$(ERLANG_OSTYPE)
 # ifeq (@MIXED_CYGWIN_VC@,yes)
 # VC++ used for compiling. If __GNUC__ is defined we will include
 # other headers then when compiling which will result in faulty
@@ -1001,23 +1004,21 @@ MG_FLAG=-MG
 endif
 
 DEP_CC=$(CC)
-DEP_FLAGS=-MM $(MG_FLAG) $(CFLAGS) $(INCLUDES) -Idrivers/common
+DEP_FLAGS=-MM $(MG_FLAG) $(CFLAGS) $(INCLUDES) -Idrivers/common -Idrivers/$(ERLANG_OSTYPE)
 SYS_SRC=$(ALL_SYS_SRC)
 endif
 
 depend:
 	$(DEP_CC) $(DEP_FLAGS) $(BEAM_SRC) \
 		| $(SED_DEPEND) > $(TARGET)/depend.mk
-	$(DEP_CC) $(DEP_FLAGS) $(DRV_SRC) \
+	$(DEP_CC) $(DEP_FLAGS) -DLIBSCTP=$(LIBSCTP) $(DRV_COMMON_SRC) \
+		| $(SED_DEPEND) >> $(TARGET)/depend.mk
+	$(DEP_CC) $(DEP_FLAGS) -I../etc/$(ERLANG_OSTYPE) $(DRV_OSTYPE_SRC) \
 		| $(SED_DEPEND) >> $(TARGET)/depend.mk
 	$(DEP_CC) $(DEP_FLAGS) $(SYS_SRC) \
 		| $(SED_DEPEND) >> $(TARGET)/depend.mk
 	$(DEP_CC) $(DEP_FLAGS) $(TARGET_SRC) \
 		| $(SED_DEPEND) >> $(TARGET)/depend.mk
-ifneq ($(TARGET),win32)
-	$(DEP_CC) $(DEP_FLAGS) $(ELIB_C_FILES) \
-		| $(SED_ELIB_DEPEND) >> $(TARGET)/depend.mk
-endif
 ifdef HIPE_ENABLED
 	$(DEP_CC) $(DEP_FLAGS) $(HIPE_SRC) \
 		| $(SED_DEPEND) >> $(TARGET)/depend.mk

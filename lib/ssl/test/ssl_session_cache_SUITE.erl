@@ -210,7 +210,7 @@ session_cleanup(Config)when is_list(Config) ->
 
     {status, _, _, StatusInfo} = sys:get_status(whereis(ssl_manager)),
     [_, _,_, _, Prop] = StatusInfo,
-    State = state(Prop),
+    State = ssl_test_lib:state(Prop),
     Cache = element(2, State),
     SessionTimer = element(6, State),
 
@@ -225,11 +225,12 @@ session_cleanup(Config)when is_list(Config) ->
     check_timer(SessionTimer),
     test_server:sleep(?DELAY *2),  %% Delay time + some extra time
 
-    DelayTimer = get_delay_timer(),
+    {ServerDelayTimer, ClientDelayTimer} = get_delay_timers(),
 
-    check_timer(DelayTimer),
+    check_timer(ServerDelayTimer),
+    check_timer(ClientDelayTimer),
 
-    test_server:sleep(?SLEEP),  %% Make sure clean has had to run
+    test_server:sleep(?SLEEP),  %% Make sure clean has had time to run
 
     undefined = ssl_session_cache:lookup(Cache, {{Hostname, Port}, Id}),
     undefined = ssl_session_cache:lookup(Cache, {Port, Id}),
@@ -238,14 +239,11 @@ session_cleanup(Config)when is_list(Config) ->
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
 
-state([{data,[{"State", State}]} | _]) ->
-    State;
-state([_ | Rest]) ->
-    state(Rest).
-
 check_timer(Timer) ->
     case erlang:read_timer(Timer) of
 	false ->
+	    {status, _, _, _} = sys:get_status(whereis(ssl_manager)),
+	    timer:sleep(?SLEEP),
 	    {status, _, _, _} = sys:get_status(whereis(ssl_manager)),
 	    ok;
 	Int ->
@@ -253,16 +251,22 @@ check_timer(Timer) ->
 	    check_timer(Timer)
     end.
 
-get_delay_timer() ->
+get_delay_timers() ->
     {status, _, _, StatusInfo} = sys:get_status(whereis(ssl_manager)),
     [_, _,_, _, Prop] = StatusInfo,
-    State = state(Prop),
+    State = ssl_test_lib:state(Prop),
     case element(7, State) of
-	undefined ->
+	{undefined, undefined} ->
 	    test_server:sleep(?SLEEP),
-	    get_delay_timer();
-	DelayTimer ->
-	    DelayTimer
+	    get_delay_timers();
+	{undefined, _} ->
+	    test_server:sleep(?SLEEP),
+	    get_delay_timers();
+	{_, undefined} ->
+	    test_server:sleep(?SLEEP),
+	    get_delay_timers();
+	DelayTimers ->
+	    DelayTimers
     end.
 %%--------------------------------------------------------------------
 session_cache_process_list(doc) ->

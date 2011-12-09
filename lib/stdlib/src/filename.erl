@@ -147,9 +147,10 @@ basename(Name) when is_binary(Name) ->
     end;
     
 basename(Name0) ->
-    Name = flatten(Name0),
+    Name1 = flatten(Name0),
     {DirSep2, DrvSep} = separators(),
-    basename1(skip_prefix(Name, DrvSep), [], DirSep2).
+    Name = skip_prefix(Name1, DrvSep),
+    basename1(Name, Name, DirSep2).
 
 win_basenameb(<<Letter,$:,Rest/binary>>) when ?IS_DRIVELETTER(Letter) ->
     basenameb(Rest,[<<"/">>,<<"\\">>]);
@@ -167,16 +168,18 @@ basenameb(Bin,Sep) ->
     
 
 
-basename1([$/|[]], Tail, DirSep2) ->
-    basename1([], Tail, DirSep2);
+basename1([$/], Tail0, _DirSep2) ->
+    %% End of filename -- must get rid of trailing directory separator.
+    [_|Tail] = lists:reverse(Tail0),
+    lists:reverse(Tail);
 basename1([$/|Rest], _Tail, DirSep2) ->
-    basename1(Rest, [], DirSep2);
+    basename1(Rest, Rest, DirSep2);
 basename1([DirSep2|Rest], Tail, DirSep2) when is_integer(DirSep2) ->
     basename1([$/|Rest], Tail, DirSep2);
 basename1([Char|Rest], Tail, DirSep2) when is_integer(Char) ->
-    basename1(Rest, [Char|Tail], DirSep2);
+    basename1(Rest, Tail, DirSep2);
 basename1([], Tail, _DirSep2) ->
-    lists:reverse(Tail).
+    Tail.
 
 skip_prefix(Name, false) ->
     Name;
@@ -369,8 +372,8 @@ extension(Name0) ->
     Name = flatten(Name0),
     extension(Name, [], major_os_type()).
 
-extension([$.|Rest], _Result, OsType) ->
-    extension(Rest, [$.], OsType);
+extension([$.|Rest]=Result, _Result, OsType) ->
+    extension(Rest, Result, OsType);
 extension([Char|Rest], [], OsType) when is_integer(Char) ->
     extension(Rest, [], OsType);
 extension([$/|Rest], _Result, OsType) ->
@@ -378,9 +381,9 @@ extension([$/|Rest], _Result, OsType) ->
 extension([$\\|Rest], _Result, win32) ->
     extension(Rest, [], win32);
 extension([Char|Rest], Result, OsType) when is_integer(Char) ->
-    extension(Rest, [Char|Result], OsType);
+    extension(Rest, Result, OsType);
 extension([], Result, _OsType) ->
-    lists:reverse(Result).
+    Result.
 
 %% Joins a list of filenames with directory separators.
 
@@ -833,16 +836,18 @@ try_file(undefined, ObjFilename, Mod, Rules) ->
 	Error -> Error
     end;
 try_file(Src, _ObjFilename, Mod, _Rules) ->
-    List = Mod:module_info(compile),
-    {options, Options} = lists:keyfind(options, 1, List),
+    List = case Mod:module_info(compile) of
+	       none -> [];
+	       List0 -> List0
+	   end,
+    Options = proplists:get_value(options, List, []),
     {ok, Cwd} = file:get_cwd(),
     AbsPath = make_abs_path(Cwd, Src),
     {AbsPath, filter_options(dirname(AbsPath), Options, [])}.
 
 %% Filters the options.
 %%
-%% 1) Remove options that have no effect on the generated code,
-%%    such as report and verbose.
+%% 1) Only keep options that have any effect on code generation.
 %%
 %% 2) The paths found in {i, Path} and {outdir, Path} are converted
 %%    to absolute paths.  When doing this, it is assumed that relatives
@@ -854,13 +859,9 @@ filter_options(Base, [{outdir, Path}|Rest], Result) ->
     filter_options(Base, Rest, [{outdir, make_abs_path(Base, Path)}|Result]);
 filter_options(Base, [{i, Path}|Rest], Result) ->
     filter_options(Base, Rest, [{i, make_abs_path(Base, Path)}|Result]);
-filter_options(Base, [Option|Rest], Result) when Option =:= trace ->
-    filter_options(Base, Rest, [Option|Result]);
 filter_options(Base, [Option|Rest], Result) when Option =:= export_all ->
     filter_options(Base, Rest, [Option|Result]);
 filter_options(Base, [Option|Rest], Result) when Option =:= binary ->
-    filter_options(Base, Rest, [Option|Result]);
-filter_options(Base, [Option|Rest], Result) when Option =:= fast ->
     filter_options(Base, Rest, [Option|Result]);
 filter_options(Base, [Tuple|Rest], Result) when element(1, Tuple) =:= d ->
     filter_options(Base, Rest, [Tuple|Result]);
@@ -875,12 +876,7 @@ filter_options(_Base, [], Result) ->
 %% Gets the source file given path of object code and module name.
 
 get_source_file(Obj, Mod, Rules) ->
-    case catch Mod:module_info(source_file) of
-	{'EXIT', _Reason} ->
-	    source_by_rules(dirname(Obj), packages:last(Mod), Rules);
-	File ->
-	    {ok, File}
-    end.
+    source_by_rules(dirname(Obj), packages:last(Mod), Rules).
 
 source_by_rules(Dir, Base, [{From, To}|Rest]) ->
     case try_rule(Dir, Base, From, To) of

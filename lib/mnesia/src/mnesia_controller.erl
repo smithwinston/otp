@@ -279,50 +279,14 @@ rec_tabs([], _, _, Init) ->
     unlink(Init),
     ok.
 
-%% New function that does exactly what get_cstructs() used to do.
-%% When this function is called, we know that the calling node knows
-%% how to convert cstructs on the receiving end (should they differ).
 get_remote_cstructs() ->
-    call(get_cstructs).
+    get_cstructs().  %% Sigh not forward compatible always check version
 
 %% Old function kept for backwards compatibility; converts cstructs before sending.
 get_cstructs() ->
     {cstructs, Cstructs, Running} = call(get_cstructs),
     Node = node(group_leader()),
-    {cstructs, normalize_cstructs(Cstructs, Node), Running}.
-
-normalize_cstructs(Cstructs, Node) ->
-    %% backward-compatibility hack; normalize before returning
-    case rpc:call(Node, mnesia_lib, val, [{schema,cstruct}]) of
-	{badrpc, _} ->
-	    %% assume it's not a schema merge
-	    Cstructs;
-	#cstruct{} ->
-	    %% same format
-	    Cstructs;
-	Cstruct ->
-	    %% some other format
-	    RemoteFields = [F || {F,_} <- rpc:call(Node, mnesia_schema, cs2list, [Cstruct])],
-	    [convert_cs(Cs, RemoteFields) || Cs <- Cstructs]
-    end.
-
-convert_cs(Cs, Fields) ->
-    MyFields = record_info(fields, cstruct),
-    convert(tl(tuple_to_list(Cs)), MyFields, Fields, []).
-
-convert([H|T], [F|FsL], [F|FsR], Acc) ->
-    convert(T, FsL, FsR, [H|Acc]);
-convert([H|T], [Fl|FsL] = L, [Fr|FsR] = R, Acc) ->
-    case {lists:member(Fl, FsR), lists:member(Fr, FsL)} of
-	{true, false} ->
-	    convert(T, L, FsR, [H|Acc]);
-	{false, true} ->
-	    %% Field Fl doesn't exist on receiver side; skip.
-	    convert(T, FsL, R, Acc)
-    end;
-convert([], _, _, Acc) ->
-    list_to_tuple([cstruct|lists:reverse(Acc)]).
-
+    {cstructs, mnesia_schema:normalize_cs(Cstructs, Node), Running}.
 
 update(Fun) ->
     call({update,Fun}).

@@ -129,10 +129,12 @@
 #define HAVE_ERTS_CHECK_IO_DEBUG
 int erts_check_io_debug(void);
 
-
-#ifndef ENABLE_CHILD_WAITER_THREAD
+#ifndef ERTS_SMP
 #  undef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
 #  define ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+#endif
+
+#ifndef ENABLE_CHILD_WAITER_THREAD
 #  ifdef ERTS_SMP
 #    define ERTS_SMP_SCHEDULERS_NEED_TO_CHECK_CHILDREN
 void erts_check_children(void);
@@ -144,6 +146,7 @@ typedef void *GETENV_STATE;
 /*
 ** For the erl_timer_sup module.
 */
+typedef time_t erts_time_t;
 
 typedef struct timeval SysTimeval;
 

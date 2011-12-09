@@ -55,7 +55,7 @@
    heap data on the C stack or if we use the buffers in the scheduler data. */
 #define TMP_HEAP_SIZE 128            /* Number of Eterm in the schedulers
 				        small heap for transient heap data */
-#define CMP_TMP_HEAP_SIZE       2    /* cmp wants its own tmp-heap... */
+#define CMP_TMP_HEAP_SIZE       32   /* cmp wants its own tmp-heap... */
 #define ERL_ARITH_TMP_HEAP_SIZE 4    /* as does erl_arith... */
 #define BEAM_EMU_TMP_HEAP_SIZE  2    /* and beam_emu... */
 
@@ -83,11 +83,7 @@
 #define CP_SIZE 1
 
 #define ErtsHAllocLockCheck(P) \
-  ERTS_SMP_LC_ASSERT((ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks((P))) \
-      	             || ((P)->id == ERTS_INVALID_PID) \
-		     || ((P)->scheduler_data \
-			 && (P) == (P)->scheduler_data->match_pseudo_process) \
-		     || erts_is_system_blocked(0))
+  ERTS_SMP_LC_ASSERT(erts_dbg_check_halloc_lock((P)))
 
 
 #ifdef DEBUG

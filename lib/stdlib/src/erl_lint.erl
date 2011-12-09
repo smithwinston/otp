@@ -2127,8 +2127,13 @@ expr({'fun',Line,Body}, Vt, St) ->
                 true -> {[],St};
                 false -> {[],call_function(Line, F, A, St)}
             end;
-	{function,_M,_F,_A} ->
-	    {[],St}
+	{function,M,F,A} when is_atom(M), is_atom(F), is_integer(A) ->
+	    %% Compatibility with pre-R15 abstract format.
+	    {[],St};
+	{function,M,F,A} ->
+	    %% New in R15.
+	    {Bvt, St1} = expr_list([M,F,A], Vt, St),
+	    {vtupdate(Bvt, Vt),St1}
     end;
 expr({call,_Line,{atom,_Lr,is_record},[E,{atom,Ln,Name}]}, Vt, St0) ->
     {Rvt,St1} = expr(E, Vt, St0),
@@ -2762,12 +2767,6 @@ default_types() ->
 		{var, 1}],
     dict:from_list([{T, -1} || T <- DefTypes]).
 
-%% R12B-5
-is_newly_introduced_builtin_type({module, 0}) -> true;
-is_newly_introduced_builtin_type({node, 0}) -> true;
-is_newly_introduced_builtin_type({nonempty_string, 0}) -> true;
-is_newly_introduced_builtin_type({term, 0}) -> true;
-is_newly_introduced_builtin_type({timeout, 0}) -> true;
 %% R13
 is_newly_introduced_builtin_type({arity, 0}) -> true;
 is_newly_introduced_builtin_type({array, 0}) -> true; % opaque

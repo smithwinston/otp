@@ -497,6 +497,7 @@ init_per_testcase2(Case, Config) ->
 		    _ ->
 			NewConfig
 		end;
+
 	    _ ->
 		NewConfig
 	end,
@@ -528,7 +529,7 @@ init_per_testcase3(Case, Config) ->
     application:stop(ssl),
     cleanup_mnesia(),
 
-    %% Set trace
+    %% Set trace level
     case lists:reverse(atom_to_list(Case)) of
 	"tset_emit" ++ _Rest -> % test-cases ending with time_test
 	    io:format(user, "~w:init_per_testcase3(~w) -> disabling trace", 
@@ -581,9 +582,10 @@ init_per_testcase3(Case, Config) ->
 		Rest;
 
 	    [X, $s, $s, $l, $_, $m, $o, $d, $_, $h, $t, $a, $c, $c, $e, $s, $s] ->
+		?ENSURE_STARTED([crypto, public_key, ssl]),		
 		SslTag = 
 		    case X of
-			$p -> ssl;  % plain
+			$p -> ssl;  % Plain
 			$e -> essl  % Erlang based ssl
 		    end,
 		case inets_test_lib:start_http_server_ssl(
@@ -597,6 +599,7 @@ init_per_testcase3(Case, Config) ->
 			{skip, "SSL does not seem to be supported"}
 		end;
 	    [X, $s, $s, $l, $_ | Rest] ->
+		?ENSURE_STARTED([crypto, public_key, ssl]),		
 		SslTag = 
 		    case X of
 			$p -> ssl;
@@ -679,23 +682,6 @@ end_per_testcase2(Case, Config) ->
 %%-------------------------------------------------------------------------
 
 %%-------------------------------------------------------------------------
-
-
-
-
-
-
-%%-------------------------------------------------------------------------
-
-%%-------------------------------------------------------------------------
-
-%%-------------------------------------------------------------------------
-
-%%-------------------------------------------------------------------------
-
-%%-------------------------------------------------------------------------
-
-%%-------------------------------------------------------------------------
 ip_mod_alias(doc) -> 
     ["Module test: mod_alias"];
 ip_mod_alias(suite) -> 
@@ -704,6 +690,7 @@ ip_mod_alias(Config) when is_list(Config) ->
     httpd_mod:alias(ip_comm, ?IP_PORT, 
 		    ?config(host, Config), ?config(node, Config)),
     ok.
+
 %%-------------------------------------------------------------------------
 ip_mod_actions(doc) -> 
     ["Module test: mod_actions"];
@@ -713,6 +700,7 @@ ip_mod_actions(Config) when is_list(Config) ->
     httpd_mod:actions(ip_comm, ?IP_PORT, 
 		      ?config(host, Config), ?config(node, Config)),
     ok.
+
 %%-------------------------------------------------------------------------
 ip_mod_security(doc) -> 
     ["Module test: mod_security"];
@@ -2276,24 +2264,24 @@ ticket_5913(doc) ->
     ["Tests that a header without last-modified is handled"];
 ticket_5913(suite) -> [];
 ticket_5913(Config) ->
-    ok=httpd_test_lib:verify_request(ip_comm, ?config(host, Config),
-				     ?IP_PORT, ?config(node, Config),
+    ok = httpd_test_lib:verify_request(ip_comm, ?config(host, Config),
+				       ?IP_PORT, ?config(node, Config),
 				       "GET /cgi-bin/erl/httpd_example:get_bin "
 				       "HTTP/1.0\r\n\r\n", 
 				       [{statuscode, 200},
-				       {version, "HTTP/1.0"}]),
+					{version, "HTTP/1.0"}]),
     ok.
 
 ticket_6003(doc) ->
     ["Tests that a URI with a bad hexadecimal code is handled"];
 ticket_6003(suite) -> [];
 ticket_6003(Config) ->
-    ok=httpd_test_lib:verify_request(ip_comm, ?config(host, Config),
-				     ?IP_PORT, ?config(node, Config),
-				     "GET http://www.erlang.org/%skalle "
-				     "HTTP/1.0\r\n\r\n",
-				     [{statuscode, 400},
-				      {version, "HTTP/1.0"}]),
+    ok = httpd_test_lib:verify_request(ip_comm, ?config(host, Config),
+				       ?IP_PORT, ?config(node, Config),
+				       "GET http://www.erlang.org/%skalle "
+				       "HTTP/1.0\r\n\r\n",
+				       [{statuscode, 400},
+					{version, "HTTP/1.0"}]),
     ok.
 
 ticket_7304(doc) ->

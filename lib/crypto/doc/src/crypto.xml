@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="latin1" ?>
+<?xml version="1.0" encoding="iso-8859-1" ?>
 <!DOCTYPE erlref SYSTEM "erlref.dtd">
 
 <erlref>
@@ -334,14 +334,16 @@ Mpint() = <![CDATA[<<ByteLen:32/integer-big, Bytes:ByteLen/binary>>]]>
     </func>
     <func>
       <name>sha_mac(Key, Data) -> Mac</name>
+      <name>sha_mac(Key, Data, MacLength) -> Mac</name>
       <fsummary>Compute an <c>MD5 MAC</c>message authentification code</fsummary>
       <type>
         <v>Key = Data = iolist() | binary()</v>
         <v>Mac = binary()</v>
+	<v>MacLenength = integer() =&lt; 20 </v>
       </type>
       <desc>
         <p>Computes an <c>SHA MAC</c> message authentification code
-          from <c>Key</c> and <c>Data</c>, where the length of the Mac
+          from <c>Key</c> and <c>Data</c>, where the default length of the Mac
           is 160 bits (20 bytes).</p>
       </desc>
     </func>
@@ -894,7 +896,7 @@ Mpint() = <![CDATA[<<ByteLen:32/integer-big, Bytes:ByteLen/binary>>]]>
         <v>Key = [E, N]</v>
         <v>E, N = Mpint</v>
         <d>Where <c>E</c> is the public exponent and <c>N</c> is public modulus.</d>
-	<v>DigestType = md5 | sha</v>
+	<v>DigestType = md5 | sha | sha256 | sha384 | sha512</v>
 	<d> The default <c>DigestType</c> is sha.</d>
         <v>Mpint = binary()</v>
       </type>
@@ -903,6 +905,8 @@ Mpint() = <![CDATA[<<ByteLen:32/integer-big, Bytes:ByteLen/binary>>]]>
           and verifies that the digest matches the RSA signature using the
           signer's public key <c>Key</c>.
 	</p>
+	<p>May throw exception <c>notsup</c> in case the chosen <c>DigestType</c>
+	is not supported by the underlying OpenSSL implementation.</p>
       </desc>
     </func>
     
@@ -1045,6 +1049,30 @@ Mpint() = <![CDATA[<<ByteLen:32/integer-big, Bytes:ByteLen/binary>>]]>
       </desc>
     </func>
 
+    <func>
+      <name>rc2_cbc_encrypt(Key, IVec, Text) -> Cipher</name>
+      <fsummary>Encrypt <c>Text</c>according to RC2 in CBC mode</fsummary>
+      <type>
+        <v>Key = Text = iolist() | binary()</v>
+        <v>Ivec = Cipher = binary()</v>
+      </type>
+      <desc>
+        <p>Encrypts <c>Text</c> according to RC2 in CBC mode.</p>
+      </desc>
+    </func>
+
+    <func>
+      <name>rc2_cbc_decrypt(Key, IVec, Cipher) -> Text</name>
+      <fsummary>Decrypts <c>Cipher</c>according to RC2 in CBC mode</fsummary>
+      <type>
+        <v>Key = Text = iolist() | binary()</v>
+        <v>Ivec = Cipher = binary()</v>
+      </type>
+      <desc>
+        <p>Decrypts <c>Cipher</c> according to RC2 in CBC mode.</p>
+      </desc>
+    </func>
+    
     <func>
       <name>rc4_encrypt(Key, Data) -> Result</name>
       <fsummary>Encrypt data using RC4</fsummary>

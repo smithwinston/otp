@@ -42,6 +42,10 @@
 #include "erl_threads.h"
 #include "erl_smp.h"
 #include "erl_time.h"
+#include "erl_thr_progress.h"
+#include "erl_thr_queue.h"
+#include "erl_sched_spec_pre_alloc.h"
+#include "beam_bp.h"
 
 #undef M_TRIM_THRESHOLD
 #undef M_TOP_PAD
@@ -75,6 +79,7 @@ typedef struct {
 
 #ifdef ERTS_SMP
 
+#if 0 /* Unused */
 static void 
 dispatch_profile_msg_q(profile_sched_msg_q *psmq)
 {
@@ -86,6 +91,7 @@ dispatch_profile_msg_q(profile_sched_msg_q *psmq)
 	profile_scheduler_q(make_small(msg->scheduler_id), msg->state, am_undefined, msg->Ms, msg->s, msg->us);
     }
 }
+#endif
 
 #endif
 
@@ -2642,7 +2648,7 @@ tailrecur_ne:
 	FloatDef f1, f2;
 	Eterm big;
 #if HEAP_ON_C_STACK
-	Eterm big_buf[2]; /* If HEAP_ON_C_STACK */
+	Eterm big_buf[CMP_TMP_HEAP_SIZE]; /* If HEAP_ON_C_STACK */
 #else
 	Eterm *big_buf = erts_get_scheduler_data()->cmp_tmp_heap;
 #endif
@@ -2653,42 +2659,98 @@ tailrecur_ne:
 	Eterm aw = a;
 	Eterm bw = b;
 #endif
+#define MAX_LOSSLESS_FLOAT ((double)((1LL << 53) - 2))
+#define MIN_LOSSLESS_FLOAT ((double)(((1LL << 53) - 2)*-1))
+#define BIG_ARITY_FLOAT_MAX (1024 / D_EXP) /* arity of max float as a bignum */
 	b_tag = tag_val_def(bw);
 
 	switch(_NUMBER_CODE(a_tag, b_tag)) {
 	case SMALL_BIG:
-	    big = small_to_big(signed_val(a), big_buf);
-	    j = big_comp(big, bw);
-	    break;
-	case SMALL_FLOAT:
-	    f1.fd = signed_val(a);
-	    GET_DOUBLE(bw, f2);
-	    j = float_comp(f1.fd, f2.fd);
+	    j = big_sign(bw) ? 1 : -1;
 	    break;
 	case BIG_SMALL:
-	    big = small_to_big(signed_val(b), big_buf);
-	    j = big_comp(aw, big);
+	    j = big_sign(aw) ? -1 : 1;
 	    break;
-	case BIG_FLOAT:
-	    if (big_to_double(aw, &f1.fd) < 0) {
-		j = big_sign(a) ? -1 : 1;
-	    } else {
-		GET_DOUBLE(bw, f2);
+	case SMALL_FLOAT:
+	    GET_DOUBLE(bw, f2);
+	    if (f2.fd < MAX_LOSSLESS_FLOAT && f2.fd > MIN_LOSSLESS_FLOAT) {
+		// Float is within the no loss limit
+		f1.fd = signed_val(aw);
 		j = float_comp(f1.fd, f2.fd);
+#if ERTS_SIZEOF_ETERM == 8
+	    } else if (f2.fd > (double) (MAX_SMALL + 1)) {
+		// Float is a positive bignum, i.e. bigger
+		j = -1;
+	    } else if (f2.fd < (double) (MIN_SMALL - 1)) {
+		// Float is a negative bignum, i.e. smaller
+		j = 1;
+	    } else { // Float is a Sint but less precise
+		j = signed_val(aw) - (Sint) f2.fd;
+	    }
+#else
+	    } else {
+		// If float is positive it is bigger than small
+		j = (f2.fd > 0.0) ? -1 : 1;
+	    }
+#endif // ERTS_SIZEOF_ETERM == 8
+	    break;
+        case FLOAT_BIG:
+	{
+	    Wterm tmp = aw;
+	    aw = bw;
+	    bw = tmp;
+	}/* fall through */
+	case BIG_FLOAT:
+	    GET_DOUBLE(bw, f2);
+	    if ((f2.fd < (double) (MAX_SMALL + 1))
+		    && (f2.fd > (double) (MIN_SMALL - 1))) {
+		// Float is a Sint
+		j = big_sign(aw) ? -1 : 1;
+	    } else if (big_arity(aw) > BIG_ARITY_FLOAT_MAX
+		       || pow(2.0,(big_arity(aw)-1)*D_EXP) > fabs(f2.fd)) {
+		// If bignum size shows that it is bigger than the abs float
+		j = big_sign(aw) ? -1 : 1;
+	    } else if (big_arity(aw) < BIG_ARITY_FLOAT_MAX
+		       && (pow(2.0,(big_arity(aw))*D_EXP)-1.0) < fabs(f2.fd)) {
+		// If bignum size shows that it is smaller than the abs float
+		j = f2.fd < 0 ? 1 : -1;
+	    } else if (f2.fd < MAX_LOSSLESS_FLOAT && f2.fd > MIN_LOSSLESS_FLOAT) {
+		// Float is within the no loss limit
+		if (big_to_double(aw, &f1.fd) < 0) {
+		    j = big_sign(aw) ? -1 : 1;
+		} else {
+		    j = float_comp(f1.fd, f2.fd);
+		}
+	    } else {
+		big = double_to_big(f2.fd, big_buf);
+		j = big_comp(aw, big);
+	    }
+	    if (_NUMBER_CODE(a_tag, b_tag) == FLOAT_BIG) {
+		j = -j;
 	    }
 	    break;
 	case FLOAT_SMALL:
 	    GET_DOUBLE(aw, f1);
-	    f2.fd = signed_val(b);
-	    j = float_comp(f1.fd, f2.fd);
-	    break;
-	case FLOAT_BIG:
-	    if (big_to_double(bw, &f2.fd) < 0) {
-		j = big_sign(b) ? 1 : -1;
-	    } else {
-		GET_DOUBLE(aw, f1);
+	    if (f1.fd < MAX_LOSSLESS_FLOAT && f1.fd > MIN_LOSSLESS_FLOAT) {
+		// Float is within the no loss limit
+		f2.fd = signed_val(bw);
 		j = float_comp(f1.fd, f2.fd);
+#if ERTS_SIZEOF_ETERM == 8
+	    } else if (f1.fd > (double) (MAX_SMALL + 1)) {
+		// Float is a positive bignum, i.e. bigger
+		j = 1;
+	    } else if (f1.fd < (double) (MIN_SMALL - 1)) {
+		// Float is a negative bignum, i.e. smaller
+		j = -1;
+	    } else { // Float is a Sint but less precise it
+		j = (Sint) f1.fd - signed_val(bw);
 	    }
+#else
+	    } else {
+		// If float is positive it is bigger than small
+		j = (f1.fd > 0.0) ? 1 : -1;
+	    }
+#endif // ERTS_SIZEOF_ETERM == 8
 	    break;
 	default:
 	    j = b_tag - a_tag;
@@ -2883,14 +2945,14 @@ Eterm
 buf_to_intlist(Eterm** hpp, char *buf, int len, Eterm tail)
 {
     Eterm* hp = *hpp;
+    int i = len - 1;
 
-    buf += (len-1);
-    while(len > 0) {
-	tail = CONS(hp, make_small((byte)*buf), tail);
+    while(i >= 0) {
+	tail = CONS(hp, make_small((Uint)(byte)buf[i]), tail);
 	hp += 2;
-	buf--;
-	len--;
+	--i;
     }
+
     *hpp = hp;
     return tail;
 }
@@ -3250,10 +3312,10 @@ erts_cancel_smp_ptimer(ErtsSmpPTimer *ptimer)
 
 #endif
 
-static Sint trim_threshold;
-static Sint top_pad;
-static Sint mmap_threshold;
-static Sint mmap_max;
+static int trim_threshold;
+static int top_pad;
+static int mmap_threshold;
+static int mmap_max;
 
 Uint tot_bin_allocated;
 
@@ -3276,8 +3338,8 @@ int
 sys_alloc_opt(int opt, int value)
 {
 #if HAVE_MALLOPT
-  Sint m_opt;
-  Sint *curr_val;
+  int m_opt;
+  int *curr_val;
 
   switch(opt) {
   case SYS_ALLOC_OPT_TRIM_THRESHOLD:
@@ -3317,7 +3379,7 @@ sys_alloc_opt(int opt, int value)
   }
 
   if(mallopt(m_opt, value)) {
-    *curr_val = (Sint) value;
+    *curr_val = value;
     return 1;
   }
 
@@ -3335,688 +3397,6 @@ sys_alloc_stat(SysAllocStat *sasp)
    sasp->mmap_max       = mmap_max;
 
 }
-
-#ifdef ERTS_SMP
-
-/* Local system block state */
-
-struct {
-    int emergency;
-    long emergency_timeout;
-    erts_smp_cnd_t watchdog_cnd;
-    erts_smp_tid_t watchdog_tid;
-    int threads_to_block;
-    int have_blocker;
-    erts_smp_tid_t blocker_tid;
-    int recursive_block;
-    Uint32 allowed_activities;
-    erts_smp_tsd_key_t blockable_key;
-    erts_smp_mtx_t mtx;
-    erts_smp_cnd_t cnd;
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    int activity_changing;
-    int checking;
-#endif
-} system_block_state;
-
-/* Global system block state */
-erts_system_block_state_t erts_system_block_state;
-
-
-static ERTS_INLINE int
-is_blockable_thread(void)
-{
-    return erts_smp_tsd_get(system_block_state.blockable_key) != NULL;
-}
-
-static ERTS_INLINE int
-is_blocker(void)
-{
-    return (system_block_state.have_blocker
-	    && erts_smp_equal_tids(system_block_state.blocker_tid,
-				   erts_smp_thr_self()));
-}
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-int
-erts_lc_is_blocking(void)
-{
-    int res;
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    res = erts_smp_pending_system_block() && is_blocker();
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-    return res;
-}
-#endif
-
-static ERTS_INLINE void
-block_me(void (*prepare)(void *),
-	 void (*resume)(void *),
-	 void *arg,
-	 int mtx_locked,
-	 int want_to_block,
-	 int update_act_changing,
-	 profile_sched_msg_q *psmq)
-{
-    if (prepare)
-	(*prepare)(arg);
-
-    /* Locks might be held... */
-
-    if (!mtx_locked)
-	erts_smp_mtx_lock(&system_block_state.mtx);
-
-    if (erts_smp_pending_system_block() && !is_blocker()) {
-	int is_blockable = is_blockable_thread();
-	ASSERT(is_blockable);
-
-	if (is_blockable)
-	    system_block_state.threads_to_block--;
-
-	if (erts_system_profile_flags.scheduler && psmq) {
-	    ErtsSchedulerData *esdp = erts_get_scheduler_data();
-	    if (esdp) {
-	    	profile_sched_msg *msg = NULL;
-	        
-		ASSERT(psmq->n < 2);
-		msg = &((psmq->msg)[psmq->n]);
-		msg->scheduler_id = esdp->no;
-		get_now(&(msg->Ms), &(msg->s), &(msg->us));
-		msg->no_schedulers = 0;
-		msg->state = am_inactive;
-	    	psmq->n++;
-	    }
-	}
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-	if (update_act_changing)
-	    system_block_state.activity_changing--;
-#endif
-
-	erts_smp_cnd_broadcast(&system_block_state.cnd);
-
-	do {
-	    erts_smp_cnd_wait(&system_block_state.cnd, &system_block_state.mtx);
-	} while (erts_smp_pending_system_block()
-		 && !(want_to_block && !system_block_state.have_blocker));
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-	if (update_act_changing)
-	    system_block_state.activity_changing++;
-#endif
-	if (erts_system_profile_flags.scheduler && psmq) {
-	    ErtsSchedulerData *esdp = erts_get_scheduler_data();
-	    if (esdp) {
-	    	profile_sched_msg *msg = NULL;
-	        
-		ASSERT(psmq->n < 2);
-		msg = &((psmq->msg)[psmq->n]);
-		msg->scheduler_id = esdp->no;
-		get_now(&(msg->Ms), &(msg->s), &(msg->us));
-		msg->no_schedulers = 0;
-		msg->state = am_active;
-	    	psmq->n++;
-	    }
-	}
-
-	if (is_blockable)
-	    system_block_state.threads_to_block++;
-    }
-
-    if (!mtx_locked)
-	erts_smp_mtx_unlock(&system_block_state.mtx);
-
-    if (resume)
-	(*resume)(arg);
-}
-
-void
-erts_block_me(void (*prepare)(void *),
-	      void (*resume)(void *),
-	      void *arg)
-{
-    profile_sched_msg_q psmq;
-    psmq.n = 0;
-    if (prepare)
-	(*prepare)(arg);
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    erts_lc_check_exact(NULL, 0); /* No locks should be locked */
-#endif
-
-    block_me(NULL, NULL, NULL, 0, 0, 0, &psmq);
-
-    if (erts_system_profile_flags.scheduler && psmq.n > 0) 
-    	dispatch_profile_msg_q(&psmq);
-
-    if (resume)
-	(*resume)(arg);
-}
-
-void
-erts_register_blockable_thread(void)
-{
-    profile_sched_msg_q psmq;
-    psmq.n = 0;
-    if (!is_blockable_thread()) {
-	erts_smp_mtx_lock(&system_block_state.mtx);
-	system_block_state.threads_to_block++;
-	erts_smp_tsd_set(system_block_state.blockable_key,
-			 (void *) &erts_system_block_state);
-
-	/* Someone might be waiting for us to block... */
-	if (erts_smp_pending_system_block())
-	    block_me(NULL, NULL, NULL, 1, 0, 0, &psmq);
-	erts_smp_mtx_unlock(&system_block_state.mtx);
-
-	if (erts_system_profile_flags.scheduler && psmq.n > 0)
-	    dispatch_profile_msg_q(&psmq);
-    }
-}
-
-void
-erts_unregister_blockable_thread(void)
-{
-    if (is_blockable_thread()) {
-	erts_smp_mtx_lock(&system_block_state.mtx);
-	system_block_state.threads_to_block--;
-	ASSERT(system_block_state.threads_to_block >= 0);
-	erts_smp_tsd_set(system_block_state.blockable_key, NULL);
-
-	/* Someone might be waiting for us to block... */
-	if (erts_smp_pending_system_block())
-	    erts_smp_cnd_broadcast(&system_block_state.cnd);
-	erts_smp_mtx_unlock(&system_block_state.mtx);
-    }
-}
-
-void
-erts_note_activity_begin(erts_activity_t activity)
-{
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    if (erts_smp_pending_system_block()) {
-	Uint32 broadcast = 0;
-	switch (activity) {
-	case ERTS_ACTIVITY_GC:
-	    broadcast = (system_block_state.allowed_activities
-			 & ERTS_BS_FLG_ALLOW_GC);
-	    break;
-	case ERTS_ACTIVITY_IO:
-	    broadcast = (system_block_state.allowed_activities
-			 & ERTS_BS_FLG_ALLOW_IO);
-	    break;
-	case ERTS_ACTIVITY_WAIT:
-	    broadcast = 1;
-	    break;
-	default:
-	    abort();
-	    break;
-	}
-	if (broadcast)
-	    erts_smp_cnd_broadcast(&system_block_state.cnd);
-    }
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-}
-
-void
-erts_check_block(erts_activity_t old_activity,
-		 erts_activity_t new_activity,
-		 int locked,
-		 void (*prepare)(void *),
-		 void (*resume)(void *),
-		 void *arg)
-{
-    int do_block;
-    profile_sched_msg_q psmq;
-
-    psmq.n = 0;
-    if (!locked && prepare)
-	(*prepare)(arg);
-
-    erts_smp_mtx_lock(&system_block_state.mtx);
-
-    /* First check if it is ok to block... */
-    if (!locked)
-	do_block = 1;
-    else {
-	switch (old_activity) {
-	case ERTS_ACTIVITY_UNDEFINED:
-	    do_block = 0;
-	    break;
-	case ERTS_ACTIVITY_GC:
-	    do_block = (system_block_state.allowed_activities
-			& ERTS_BS_FLG_ALLOW_GC);
-	    break;
-	case ERTS_ACTIVITY_IO:
-	    do_block = (system_block_state.allowed_activities
-			& ERTS_BS_FLG_ALLOW_IO);
-	    break;
-	case ERTS_ACTIVITY_WAIT:
-	    /* You are not allowed to leave activity waiting
-	     * without supplying the possibility to block
-	     * unlocked.
-	     */
-	    erts_set_activity_error(ERTS_ACT_ERR_LEAVE_WAIT_UNLOCKED,
-				    __FILE__, __LINE__);
-	    do_block = 0;
-	    break;
-	default:
-	    erts_set_activity_error(ERTS_ACT_ERR_LEAVE_UNKNOWN_ACTIVITY,
-				    __FILE__, __LINE__);
-	    do_block = 0;
-	    break;
-	}
-    }
-
-    if (do_block) {
-	/* ... then check if it is necessary to block... */
-
-	switch (new_activity) {
-	case ERTS_ACTIVITY_UNDEFINED:
-	    do_block = 1;
-	    break;
-	case ERTS_ACTIVITY_GC:
-	    do_block = !(system_block_state.allowed_activities
-			 & ERTS_BS_FLG_ALLOW_GC);
-	break;
-	case ERTS_ACTIVITY_IO:
-	    do_block = !(system_block_state.allowed_activities
-			 & ERTS_BS_FLG_ALLOW_IO);
-	    break;
-	case ERTS_ACTIVITY_WAIT:
-	    /* No need to block if we are going to wait */
-	    do_block = 0;
-	    break;
-	default:
-	    erts_set_activity_error(ERTS_ACT_ERR_ENTER_UNKNOWN_ACTIVITY,
-				    __FILE__, __LINE__);
-	    break;
-	}
-    }
-
-    if (do_block) {
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-	if (!locked) {
-	    /* Only system_block_state.mtx should be held */
-	    erts_lc_check_exact(&system_block_state.mtx.lc, 1);
-	}
-#endif
-
-	block_me(NULL, NULL, NULL, 1, 0, 1, &psmq);
-
-    }
-
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-
-    if (erts_system_profile_flags.scheduler && psmq.n > 0) 
-	dispatch_profile_msg_q(&psmq);	
-
-    if (!locked && resume)
-	(*resume)(arg);
-}
-
-
-
-void
-erts_set_activity_error(erts_activity_error_t error, char *file, int line)
-{
-    switch (error) {
-    case ERTS_ACT_ERR_LEAVE_WAIT_UNLOCKED:
-	erl_exit(1, "%s:%d: Fatal error: Leaving activity waiting without "
-		 "supplying the possibility to block unlocked.",
-		 file, line);
-	break;
-    case ERTS_ACT_ERR_LEAVE_UNKNOWN_ACTIVITY:
-	erl_exit(1, "%s:%d: Fatal error: Leaving unknown activity.",
-		 file, line);
-	break;
-    case ERTS_ACT_ERR_ENTER_UNKNOWN_ACTIVITY:
-	erl_exit(1, "%s:%d: Fatal error: Leaving unknown activity.",
-		 file, line);
-	break;
-    default:
-	erl_exit(1, "%s:%d: Internal error in erts_smp_set_activity()",
-		 file, line);
-	break;
-    }
-
-}
-
-
-static ERTS_INLINE erts_aint32_t
-threads_not_under_control(void)
-{
-    erts_aint32_t res = system_block_state.threads_to_block;
-
-    ERTS_THR_MEMORY_BARRIER;
-
-    /* Waiting is always an allowed activity... */
-    res -= erts_smp_atomic32_read_nob(&erts_system_block_state.in_activity.wait);
-
-    if (system_block_state.allowed_activities & ERTS_BS_FLG_ALLOW_GC)
-	res -= erts_smp_atomic32_read_nob(&erts_system_block_state.in_activity.gc);
-
-    if (system_block_state.allowed_activities & ERTS_BS_FLG_ALLOW_IO)
-	res -= erts_smp_atomic32_read_nob(&erts_system_block_state.in_activity.io);
-
-    if (res < 0) {
-	ASSERT(0);
-	return 0;
-    }
-    return res;
-}
-
-/*
- * erts_block_system() blocks all threads registered as blockable.
- * It doesn't return until either all threads have blocked (0 is returned)
- * or it has timed out (ETIMEDOUT) is returned.
- *
- * If allowed activities == 0, blocked threads will release all locks
- * before blocking.
- *
- * If allowed_activities is != 0, erts_block_system() will allow blockable
- * threads to continue executing as long as they are doing an allowed
- * activity. When they are done with the allowed activity they will block,
- * *but* they will block holding locks. Therefore, the thread calling
- * erts_block_system() must *not* try to aquire any locks that might be
- * held by blocked threads holding locks from allowed activities.
- *
- * Currently allowed_activities are:
- *	* ERTS_BS_FLG_ALLOW_GC		Thread continues with garbage
- *					collection and blocks with
- *					main process lock on current
- *					process locked.
- *	* ERTS_BS_FLG_ALLOW_IO		Thread continues with I/O
- */
-
-void
-erts_block_system(Uint32 allowed_activities)
-{
-    int do_block;
-    profile_sched_msg_q psmq;
-    
-    psmq.n = 0;
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    erts_lc_check_exact(NULL, 0); /* No locks should be locked */
-#endif
-
-    erts_smp_mtx_lock(&system_block_state.mtx);
-
-    do_block = erts_smp_pending_system_block();
-    if (do_block
-	&& system_block_state.have_blocker
-	&& erts_smp_equal_tids(system_block_state.blocker_tid,
-			       erts_smp_thr_self())) {
-	ASSERT(system_block_state.recursive_block >= 0);
-	system_block_state.recursive_block++;
-
-	/* You are not allowed to restrict allowed activites
-	   in a recursive block! */
-	ERTS_SMP_LC_ASSERT((system_block_state.allowed_activities
-			    & ~allowed_activities) == 0);
-    }
-    else {
-
-	erts_smp_atomic32_inc_nob(&erts_system_block_state.do_block);
-
-	/* Someone else might be waiting for us to block... */
-	if (do_block) {
-	do_block_me:
-	    block_me(NULL, NULL, NULL, 1, 1, 0, &psmq);
-	}
-
-	ASSERT(!system_block_state.have_blocker);
-	system_block_state.have_blocker = 1;
-	system_block_state.blocker_tid = erts_smp_thr_self();
-	system_block_state.allowed_activities = allowed_activities;
-
-	if (is_blockable_thread())
-	    system_block_state.threads_to_block--;
-
-	while (threads_not_under_control() && !system_block_state.emergency)
-	    erts_smp_cnd_wait(&system_block_state.cnd, &system_block_state.mtx);
-
-	if (system_block_state.emergency) {
-	    system_block_state.have_blocker = 0;
-	    goto do_block_me;
-	}
-    }
-
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-
-    if (erts_system_profile_flags.scheduler && psmq.n > 0 )
-    	dispatch_profile_msg_q(&psmq);
-}
-
-/*
- * erts_emergency_block_system() should only be called when we are
- * about to write a crash dump...
- */
-
-int
-erts_emergency_block_system(long timeout, Uint32 allowed_activities)
-{
-    int res = 0;
-    long another_blocker;
-
-    erts_smp_mtx_lock(&system_block_state.mtx);
-
-    if (system_block_state.emergency) {
-	 /* Argh... */
-	res = EINVAL;
-	goto done;
-    }
-
-    another_blocker = erts_smp_pending_system_block();
-    system_block_state.emergency = 1;
-    erts_smp_atomic32_inc_nob(&erts_system_block_state.do_block);
-
-    if (another_blocker) {
-	if (is_blocker()) {
-	    erts_smp_atomic32_dec_nob(&erts_system_block_state.do_block);
-	    res = 0;
-	    goto done;
-	}
-	/* kick the other blocker */
-	erts_smp_cnd_broadcast(&system_block_state.cnd);
-	while (system_block_state.have_blocker)
-	    erts_smp_cnd_wait(&system_block_state.cnd, &system_block_state.mtx);
-    }
-
-    ASSERT(!system_block_state.have_blocker);
-    system_block_state.have_blocker = 1;
-    system_block_state.blocker_tid = erts_smp_thr_self();
-    system_block_state.allowed_activities = allowed_activities;
-
-    if (is_blockable_thread())
-	system_block_state.threads_to_block--;
-
-    if (timeout < 0) {
-	while (threads_not_under_control())
-	    erts_smp_cnd_wait(&system_block_state.cnd, &system_block_state.mtx);
-    }
-    else {	
-	system_block_state.emergency_timeout = timeout;
-	erts_smp_cnd_signal(&system_block_state.watchdog_cnd);
-
-	while (system_block_state.emergency_timeout >= 0
-	       && threads_not_under_control()) {
-	    erts_smp_cnd_wait(&system_block_state.cnd,
-			      &system_block_state.mtx);
-	}
-    }
- done:
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-    return res;
-}
-
-void
-erts_release_system(void)
-{
-    long do_block;
-    profile_sched_msg_q psmq;
-    
-    psmq.n = 0;
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    erts_lc_check_exact(NULL, 0); /* No locks should be locked */
-#endif
-
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    ASSERT(is_blocker());
-
-    ASSERT(system_block_state.recursive_block >= 0);
-
-    if (system_block_state.recursive_block)
-	system_block_state.recursive_block--;
-    else {
-	do_block = erts_smp_atomic32_dec_read_nob(&erts_system_block_state.do_block);
-	system_block_state.have_blocker = 0;
-	if (is_blockable_thread())
-	    system_block_state.threads_to_block++;
-	else
-	    do_block = 0;
-
-	/* Someone else might be waiting for us to block... */
-	if (do_block)
-	    block_me(NULL, NULL, NULL, 1, 0, 0, &psmq);
-	else
-	    erts_smp_cnd_broadcast(&system_block_state.cnd);
-    }
-
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-
-    if (erts_system_profile_flags.scheduler && psmq.n > 0) 
-    	dispatch_profile_msg_q(&psmq);
-}
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-
-void
-erts_lc_activity_change_begin(void)
-{
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    system_block_state.activity_changing++;
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-}
-
-void
-erts_lc_activity_change_end(void)
-{
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    system_block_state.activity_changing--;
-    if (system_block_state.checking && !system_block_state.activity_changing)
-	erts_smp_cnd_broadcast(&system_block_state.cnd);
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-}
-
-#endif
-
-int
-erts_is_system_blocked(erts_activity_t allowed_activities)
-{
-    int blkd;
-
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    blkd = (erts_smp_pending_system_block()
-	    && system_block_state.have_blocker
-	    && erts_smp_equal_tids(system_block_state.blocker_tid,
-				   erts_smp_thr_self())
-	    && !(system_block_state.allowed_activities & ~allowed_activities));
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    if (blkd) {
-	system_block_state.checking = 1;
-	while (system_block_state.activity_changing)
-	    erts_smp_cnd_wait(&system_block_state.cnd, &system_block_state.mtx);
-	system_block_state.checking = 0;
-	blkd = !threads_not_under_control();
-    }
-#endif
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-    return blkd;
-}
-
-static void *
-emergency_watchdog(void *unused)
-{
-    erts_smp_mtx_lock(&system_block_state.mtx);
-    while (1) {
-	long timeout;
-	while (system_block_state.emergency_timeout < 0)
-	    erts_smp_cnd_wait(&system_block_state.watchdog_cnd, &system_block_state.mtx);
-	timeout = system_block_state.emergency_timeout;
-	erts_smp_mtx_unlock(&system_block_state.mtx);
-
-	if (erts_disable_tolerant_timeofday)
-	    erts_milli_sleep(timeout);
-	else {
-	    SysTimeval to;
-	    erts_get_timeval(&to);
-	    to.tv_sec += timeout / 1000;
-	    to.tv_usec += timeout % 1000;
-
-	    while (1) {
-		SysTimeval curr;
-		erts_milli_sleep(timeout);
-		erts_get_timeval(&curr);
-		if (curr.tv_sec > to.tv_sec
-		    || (curr.tv_sec == to.tv_sec && curr.tv_usec >= to.tv_usec)) {
-		    break;
-		}
-		timeout = (to.tv_sec - curr.tv_sec)*1000;
-		timeout += (to.tv_usec - curr.tv_usec)/1000;
-	    }
-	}
-
-	erts_smp_mtx_lock(&system_block_state.mtx);
-	system_block_state.emergency_timeout = -1;
-	erts_smp_cnd_broadcast(&system_block_state.cnd);
-    }
-    erts_smp_mtx_unlock(&system_block_state.mtx);
-    return NULL;
-}
-
-void
-erts_system_block_init(void)
-{
-    erts_smp_thr_opts_t thr_opts = ERTS_SMP_THR_OPTS_DEFAULT_INITER;
-    /* Local state... */
-    system_block_state.emergency = 0;
-    system_block_state.emergency_timeout = -1;
-    erts_smp_cnd_init(&system_block_state.watchdog_cnd);
-    system_block_state.threads_to_block = 0;
-    system_block_state.have_blocker = 0;
-    /* system_block_state.block_tid */
-    system_block_state.recursive_block = 0;
-    system_block_state.allowed_activities = 0;
-    erts_smp_tsd_key_create(&system_block_state.blockable_key);
-    erts_smp_mtx_init(&system_block_state.mtx, "system_block");
-    erts_smp_cnd_init(&system_block_state.cnd);
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    system_block_state.activity_changing = 0;
-    system_block_state.checking = 0;
-#endif
-
-    thr_opts.suggested_stack_size = 8;
-    erts_smp_thr_create(&system_block_state.watchdog_tid,
-			emergency_watchdog,
-			NULL,
-			&thr_opts);
-
-    /* Global state... */
-
-    erts_smp_atomic32_init_nob(&erts_system_block_state.do_block, 0);
-    erts_smp_atomic32_init_nob(&erts_system_block_state.in_activity.wait, 0);
-    erts_smp_atomic32_init_nob(&erts_system_block_state.in_activity.gc, 0);
-    erts_smp_atomic32_init_nob(&erts_system_block_state.in_activity.io, 0);
-
-    /* Make sure blockable threads unregister when exiting... */
-    erts_smp_install_exit_handler(erts_unregister_blockable_thread);
-}
-
-
-#endif /* #ifdef ERTS_SMP */
 
 char *
 erts_read_env(char *key)

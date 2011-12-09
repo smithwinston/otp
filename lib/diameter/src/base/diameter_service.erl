@@ -64,7 +64,6 @@
 
 -include_lib("diameter/include/diameter.hrl").
 -include("diameter_internal.hrl").
--include("diameter_types.hrl").
 
 -define(STATE_UP,   up).
 -define(STATE_DOWN, down).
@@ -117,7 +116,7 @@
         {pid  :: match(pid()),
          type :: match(connect | accept),
          ref  :: match(reference()),  %% key into diameter_config
-         options :: match([transport_opt()]), %% as passed to start_transport
+         options :: match([diameter:transport_opt()]),%% from start_transport
          op_state = ?STATE_DOWN :: match(?STATE_DOWN | ?STATE_UP),
          started = now(),      %% at process start
          conn = false :: match(boolean() | pid())}).
@@ -126,7 +125,7 @@
 %% Record representing a peer_fsm process.
 -record(conn,
         {pid   :: pid(),
-         apps  :: [{0..16#FFFFFFFF, app_alias()}], %% {Id, Alias}
+         apps  :: [{0..16#FFFFFFFF, diameter:app_alias()}], %% {Id, Alias}
          caps  :: #diameter_caps{},
          started = now(),  %% at process start
          peer  :: pid()}). %% key into peerT
@@ -137,16 +136,16 @@
          handler    :: match(pid()), %% request process
          transport  :: match(pid()), %% peer process
          caps       :: match(#diameter_caps{}),
-         app        :: match(app_alias()),  %% #diameter_app.alias
+         app        :: match(diameter:app_alias()),  %% #diameter_app.alias
          dictionary :: match(module()),     %% #diameter_app.dictionary
-         module     :: match(nonempty_improper_list(module(), list())),
+         module     :: match([module() | list()]),
                     %% #diameter_app.module
-         filter     :: match(peer_filter()),
+         filter     :: match(diameter:peer_filter()),
          packet     :: match(#diameter_packet{})}).
 
 %% Record call/4 options are parsed into.
 -record(options,
-        {filter = none  :: peer_filter(),
+        {filter = none  :: diameter:peer_filter(),
          extra = []     :: list(),
          timeout = ?DEFAULT_TIMEOUT :: 0..16#FFFFFFFF,
          detach = false :: boolean()}).
@@ -647,11 +646,6 @@ mod_state(Alias) ->
 mod_state(Alias, ModS) ->
     put({?MODULE, mod_state, Alias}, ModS).
 
-%% have_transport/2
-
-have_transport(SvcName, Ref) ->
-    [] /= diameter_config:have_transport(SvcName, Ref).
-
 %%% ---------------------------------------------------------------------------
 %%% # shutdown/2
 %%% ---------------------------------------------------------------------------
@@ -983,7 +977,8 @@ peer_cb(MFA, Alias) ->
 connection_down(Pid, #state{peerT = PeerT,
                             connT = ConnT}
                      = S) ->
-    #peer{conn = TPid}
+    #peer{op_state = ?STATE_UP,  %% assert
+          conn = TPid}
         = P
         = fetch(PeerT, Pid),
 
@@ -992,6 +987,9 @@ connection_down(Pid, #state{peerT = PeerT,
     connection_down(P,C,S).
 
 %% connection_down/3
+
+connection_down(#peer{op_state = ?STATE_DOWN}, _, S) ->
+    S;
 
 connection_down(#peer{conn = TPid,
                       op_state = ?STATE_UP}
@@ -1034,13 +1032,23 @@ down_conn(Id, Alias, TC, {SvcName, Apps}) ->
 
 %% Peer process has died.
 
-peer_down(Pid, _Reason, #state{peerT = PeerT} = S) ->
+peer_down(Pid, Reason, #state{peerT = PeerT} = S) ->
     P = fetch(PeerT, Pid),
     ets:delete_object(PeerT, P),
+    closed(Reason, P, S),
     restart(P,S),
     peer_down(P,S).
 
-%% peer_down/2
+%% Send an event at connection establishment failure.
+closed({shutdown, {close, _TPid, Reason}},
+       #peer{op_state = ?STATE_DOWN,
+             ref = Ref,
+             type = Type,
+             options = Opts},
+       #state{service_name = SvcName}) ->
+    send_event(SvcName, {closed, Ref, Reason, {type(Type), Opts}});
+closed(_, _, _) ->
+    ok.
 
 %% The peer has never come up ...
 peer_down(#peer{conn = B}, S)
@@ -1048,27 +1056,9 @@ peer_down(#peer{conn = B}, S)
     S;
 
 %% ... or it has.
-peer_down(#peer{ref = Ref,
-                conn = TPid,
-                type = Type,
-                options = Opts}
-          = P,
-          #state{service_name = SvcName,
-                 connT = ConnT}
-          = S) ->
-    #conn{caps = Caps}
-        = C
-        = fetch(ConnT, TPid),
+peer_down(#peer{conn = TPid} = P, #state{connT = ConnT} = S) ->
+    #conn{} = C = fetch(ConnT, TPid),
     ets:delete_object(ConnT, C),
-    try
-        pd(P,C,S)
-    after
-        send_event(SvcName, {closed, Ref, {TPid, Caps}, {type(Type), Opts}})
-    end.
-
-pd(#peer{op_state = ?STATE_DOWN}, _, S) ->
-    S;
-pd(#peer{op_state = ?STATE_UP} = P, C, S) ->
     connection_down(P,C,S).
 
 %% restart/2
@@ -1135,7 +1125,7 @@ start_tc(Tc, T, _) ->
 %% tc_timeout/2
 
 tc_timeout({Ref, _Type, _Opts} = T, #state{service_name = SvcName} = S) ->
-    tc(have_transport(SvcName, Ref), T, S).
+    tc(diameter_config:have_transport(SvcName, Ref), T, S).
 
 tc(true, {Ref, Type, Opts}, #state{service_name = SvcName}
                             = S) ->
@@ -1163,7 +1153,7 @@ close(Pid, #state{service_name = SvcName,
           options = Opts}
         = fetch(PeerT, Pid),
 
-    c(Pid, have_transport(SvcName, Ref), Opts).
+    c(Pid, diameter_config:have_transport(SvcName, Ref), Opts).
 
 %% Tell watchdog to (maybe) die later ...
 c(Pid, true, Opts) ->
@@ -1259,11 +1249,11 @@ send_request({TPid, Caps, App}, Msg, Opts, Caller, SvcName) ->
     #diameter_app{module = ModX}
         = App,
 
-    Pkt = make_packet(Msg),
+    Pkt = make_request_packet(Msg),
 
     case cb(ModX, prepare_request, [Pkt, SvcName, {TPid, Caps}]) of
         {send, P} ->
-            send_request(make_packet(P, Pkt),
+            send_request(make_request_packet(P, Pkt),
                          TPid,
                          Caps,
                          App,
@@ -1278,70 +1268,73 @@ send_request({TPid, Caps, App}, Msg, Opts, Caller, SvcName) ->
             ?ERROR({invalid_return, prepare_request, App, T})
     end.
 
-%% make_packet/1
+%% make_request_packet/1
 %%
 %% Turn an outgoing request as passed to call/4 into a diameter_packet
 %% record in preparation for a prepare_request callback.
 
-make_packet(Bin)
+make_request_packet(Bin)
   when is_binary(Bin) ->
     #diameter_packet{header = diameter_codec:decode_header(Bin),
                      bin = Bin};
 
-make_packet(#diameter_packet{msg = [#diameter_header{} = Hdr | Avps]} = Pkt) ->
-    Pkt#diameter_packet{msg = [make_header(Hdr) | Avps]};
+make_request_packet(#diameter_packet{msg = [#diameter_header{} = Hdr | Avps]}
+                    = Pkt) ->
+    Pkt#diameter_packet{msg = [make_request_header(Hdr) | Avps]};
 
-make_packet(#diameter_packet{header = Hdr} = Pkt) ->
-    Pkt#diameter_packet{header = make_header(Hdr)};
+make_request_packet(#diameter_packet{header = Hdr} = Pkt) ->
+    Pkt#diameter_packet{header = make_request_header(Hdr)};
 
-make_packet(Msg) ->
-    make_packet(#diameter_packet{msg = Msg}).
+make_request_packet(Msg) ->
+    make_request_packet(#diameter_packet{msg = Msg}).
 
-%% make_header/1
+%% make_request_header/1
 
-make_header(undefined) ->
+make_request_header(undefined) ->
     Seq = diameter_session:sequence(),
-    make_header(#diameter_header{end_to_end_id = Seq,
-                                 hop_by_hop_id = Seq});
+    make_request_header(#diameter_header{end_to_end_id = Seq,
+                                         hop_by_hop_id = Seq});
 
-make_header(#diameter_header{version = undefined} = Hdr) ->
-    make_header(Hdr#diameter_header{version = ?DIAMETER_VERSION});
+make_request_header(#diameter_header{version = undefined} = Hdr) ->
+    make_request_header(Hdr#diameter_header{version = ?DIAMETER_VERSION});
 
-make_header(#diameter_header{end_to_end_id = undefined} = H) ->
+make_request_header(#diameter_header{end_to_end_id = undefined} = H) ->
     Seq = diameter_session:sequence(),
-    make_header(H#diameter_header{end_to_end_id = Seq});
+    make_request_header(H#diameter_header{end_to_end_id = Seq});
 
-make_header(#diameter_header{hop_by_hop_id = undefined} = H) ->
+make_request_header(#diameter_header{hop_by_hop_id = undefined} = H) ->
     Seq = diameter_session:sequence(),
-    make_header(H#diameter_header{hop_by_hop_id = Seq});
+    make_request_header(H#diameter_header{hop_by_hop_id = Seq});
 
-make_header(#diameter_header{} = Hdr) ->
+make_request_header(#diameter_header{} = Hdr) ->
     Hdr;
 
-make_header(T) ->
+make_request_header(T) ->
     ?ERROR({invalid_header, T}).
 
-%% make_packet/2
+%% make_request_packet/2
 %%
 %% Reconstruct a diameter_packet from the return value of
 %% prepare_request or prepare_retransmit callback.
 
-make_packet(Bin, _)
+make_request_packet(Bin, _)
   when is_binary(Bin) ->
-    make_packet(Bin);
+    make_request_packet(Bin);
 
-make_packet(#diameter_packet{msg = [#diameter_header{} | _]} = Pkt, _) ->
+make_request_packet(#diameter_packet{msg = [#diameter_header{} | _]}
+                    = Pkt,
+                    _) ->
     Pkt;
 
 %% Returning a diameter_packet with no header from a prepare_request
 %% or prepare_retransmit callback retains the header passed into it.
 %% This is primarily so that the end to end and hop by hop identifiers
 %% are retained.
-make_packet(#diameter_packet{header = Hdr} = Pkt,
+make_request_packet(#diameter_packet{header = Hdr} = Pkt,
             #diameter_packet{header = Hdr0}) ->
     Pkt#diameter_packet{header = fold_record(Hdr0, Hdr)};
 
-make_packet(Msg, Pkt) ->
+make_request_packet(Msg, Pkt) ->
     Pkt#diameter_packet{msg = Msg}.
 
 %% fold_record/2
@@ -1491,7 +1484,7 @@ pd([], _) ->
 send_request(TPid, #diameter_packet{bin = Bin} = Pkt, Req, Timeout)
   when node() == node(TPid) ->
     %% Store the outgoing request before sending to avoid a race with
-   %% reply reception.
+    %% reply reception.
     TRef = store_request(TPid, Bin, Req, Timeout),
     send(TPid, Pkt),
     TRef;
@@ -1533,7 +1526,7 @@ retransmit({TPid, Caps, #diameter_app{alias = Alias} = App},
 
     case cb(App, prepare_retransmit, [Pkt, SvcName, {TPid, Caps}]) of
         {send, P} ->
-            retransmit(make_packet(P, Pkt), TPid, Caps, Req, Timeout);
+            retransmit(make_request_packet(P, Pkt), TPid, Caps, Req, Timeout);
         {discard, Reason} ->
             ?THROW(Reason);
         discard ->
@@ -1946,8 +1939,8 @@ reply(Msg, Dict, TPid, #diameter_packet{errors = Es,
                        = ReqPkt)
   when [] == Es;
        is_record(hd(Msg), diameter_header) ->
-    Pkt = diameter_codec:encode(Dict, make_reply_packet(Msg, ReqPkt)),
-    incr(send, Pkt, Dict, TPid),  %% count result codes in sent answers
+    Pkt = diameter_codec:encode(Dict, make_answer_packet(Msg, ReqPkt)),
+    incr(send, Pkt, TPid),  %% count result codes in sent answers
     send(TPid, Pkt#diameter_packet{transport_data = TD});
 
 %% Or not: set Result-Code and Failed-AVP AVP's.
@@ -1957,18 +1950,19 @@ reply(Msg, Dict, TPid, #diameter_packet{errors = [H|_] = Es} = Pkt) ->
           TPid,
           Pkt#diameter_packet{errors = []}).
 
-%% make_reply_packet/2
+%% make_answer_packet/2
 
 %% Binaries and header/avp lists are sent as-is.
-make_reply_packet(Bin, _)
+make_answer_packet(Bin, _)
   when is_binary(Bin) ->
     #diameter_packet{bin = Bin};
-make_reply_packet([#diameter_header{} | _] = Msg, _) ->
+make_answer_packet([#diameter_header{} | _] = Msg, _) ->
     #diameter_packet{msg = Msg};
 
 %% Otherwise a reply message clears the R and T flags and retains the
-%% P flag. The E flag will be set at encode.
-make_reply_packet(Msg, #diameter_packet{header = ReqHdr}) ->
+%% P flag. The E flag will be set at encode. 6.2 of 3588 requires the
+%% same P flag on an answer as on the request.
+make_answer_packet(Msg, #diameter_packet{header = ReqHdr}) ->
     Hdr = ReqHdr#diameter_header{version = ?DIAMETER_VERSION,
                                  is_request = false,
                                  is_error = undefined,
@@ -2218,12 +2212,11 @@ a(#diameter_packet{errors = []}
   SvcName,
   AE,
   #request{transport = TPid,
-           dictionary = Dict,
            caps = Caps,
            packet = P}
   = Req) ->
     try
-        incr(in, Pkt, Dict, TPid)
+        incr(in, Pkt, TPid)
     of
         _ ->
             cb(Req, handle_answer, [Pkt, msg(P), SvcName, {TPid, Caps}])
@@ -2254,18 +2247,17 @@ e(Pkt, SvcName, discard, Req) ->
 %% Increment a stats counter for an incoming or outgoing message.
 
 %% TODO: fix
-incr(_, #diameter_packet{msg = undefined}, _, _) ->
+incr(_, #diameter_packet{msg = undefined}, _) ->
     ok;
 
-incr(Dir, Pkt, Dict, TPid)
+incr(Dir, Pkt, TPid)
   when is_pid(TPid) ->
     #diameter_packet{header = #diameter_header{is_error = E}
                             = Hdr,
                      msg = Rec}
         = Pkt,
 
-    D  = choose(E, ?BASE, Dict),
-    RC = int(get_avp_value(D, 'Result-Code', Rec)),
+    RC = int(get_avp_value(?BASE, 'Result-Code', Rec)),
     PE = is_protocol_error(RC),
 
     %% Check that the E bit is set only for 3xxx result codes.
@@ -2273,7 +2265,7 @@ incr(Dir, Pkt, Dict, TPid)
         orelse (E andalso PE)
         orelse x({invalid_error_bit, RC}, answer, [Dir, Pkt]),
 
-    Ctr = rc_counter(D, Rec, RC),
+    Ctr = rc_counter(Rec, RC),
     is_tuple(Ctr)
         andalso incr(TPid, {diameter_codec:msg_id(Hdr), Dir, Ctr}).
 
@@ -2291,11 +2283,11 @@ incr(TPid, Counter) ->
 %% Maintain statistics assuming one or the other, not both, which is
 %% surely the intent of the RFC.
 
-rc_counter(_, _, RC)
+rc_counter(_, RC)
   when is_integer(RC) ->
     {'Result-Code', RC};
-rc_counter(D, Rec, _) ->
-    rcc(get_avp_value(D, 'Experimental-Result', Rec)).
+rc_counter(Rec, _) ->
+    rcc(get_avp_value(?BASE, 'Experimental-Result', Rec)).
 
 %% Outgoing answers may be in any of the forms messages can be sent
 %% in. Incoming messages will be records. We're assuming here that the
@@ -2355,8 +2347,8 @@ rt(#request{packet = #diameter_packet{msg = undefined}}, _) ->
     false;  %% TODO: Not what we should do.
 
 %% ... or not.
-rt(#request{packet = #diameter_packet{msg = Msg}, dictionary = D} = Req, S) ->
-    find_transport(get_destination(Msg, D), Req, S).
+rt(#request{packet = #diameter_packet{msg = Msg}} = Req, S) ->
+    find_transport(get_destination(Msg), Req, S).
 
 %%% ---------------------------------------------------------------------------
 %%% # report_status/5
@@ -2468,12 +2460,12 @@ find_transport({alias, Alias}, Msg, Opts, #state{service = Svc} = S) ->
 find_transport(#diameter_app{} = App, Msg, Opts, S) ->
     ft(App, Msg, Opts, S).
 
-ft(#diameter_app{module = Mod, dictionary = D} = App, Msg, Opts, S) ->
+ft(#diameter_app{module = Mod} = App, Msg, Opts, S) ->
     #options{filter = Filter,
              extra = Xtra}
         = Opts,
     pick_peer(App#diameter_app{module = Mod ++ Xtra},
-              get_destination(Msg, D),
+              get_destination(Msg),
               Filter,
               S);
 ft(false = No, _, _, _) ->
@@ -2509,11 +2501,11 @@ find_transport([_,_] = RH,
               Filter,
               S).
 
-%% get_destination/2
+%% get_destination/1
 
-get_destination(Msg, Dict) ->
-    [str(get_avp_value(Dict, 'Destination-Realm', Msg)),
-     str(get_avp_value(Dict, 'Destination-Host', Msg))].
+get_destination(Msg) ->
+    [str(get_avp_value(?BASE, 'Destination-Realm', Msg)),
+     str(get_avp_value(?BASE, 'Destination-Host', Msg))].
 
 %% This is not entirely correct. The avp could have an arity 1, in
 %% which case an empty list is a DiameterIdentity of length 0 rather

@@ -54,12 +54,11 @@
 
 -include_lib("diameter/include/diameter.hrl").
 -include("diameter_internal.hrl").
--include("diameter_types.hrl").
 -include("diameter_gen_base_rfc3588.hrl").
 
--define(SUCCESS, ?'DIAMETER_BASE_RESULT-CODE_DIAMETER_SUCCESS').
--define(NOAPP, ?'DIAMETER_BASE_RESULT-CODE_DIAMETER_NO_COMMON_APPLICATION').
--define(NOSECURITY, ?'DIAMETER_BASE_RESULT-CODE_DIAMETER_NO_COMMON_SECURITY').
+-define(SUCCESS,    2001).  %% DIAMETER_SUCCESS
+-define(NOAPP,      5010).  %% DIAMETER_NO_COMMON_APPLICATION
+-define(NOSECURITY, 5017).  %% DIAMETER_NO_COMMON_SECURITY
 
 -define(NO_INBAND_SECURITY, 0).
 -define(TLS, 1).
@@ -75,13 +74,17 @@ build_CER(Caps) ->
     try_it([fun bCER/1, Caps]).
 
 -spec recv_CER(#diameter_base_CER{}, #diameter_service{})
-   -> tried({['Unsigned32'()], #diameter_caps{}, #diameter_base_CEA{}}).
+   -> tried({[diameter:'Unsigned32'()],
+             #diameter_caps{},
+             #diameter_base_CEA{}}).
 
 recv_CER(CER, Svc) ->
     try_it([fun rCER/2, CER, Svc]).
 
 -spec recv_CEA(#diameter_base_CEA{}, #diameter_service{})
-   -> tried({['Unsigned32'()], ['Unsigned32'()], #diameter_caps{}}).
+   -> tried({[diameter:'Unsigned32'()],
+             [diameter:'Unsigned32'()],
+             #diameter_caps{}}).
 
 recv_CEA(CEA, Svc) ->
     try_it([fun rCEA/2, CEA, Svc]).
@@ -96,7 +99,7 @@ try_it([Fun | Args]) ->
     try apply(Fun, Args) of
         T -> {ok, T}
     catch
-        throw: ?FAILURE(Reason) -> {error, {Reason, Args}}
+        throw: ?FAILURE(Reason) -> {error, Reason}
     end.
 
 %% mk_caps/2
@@ -224,10 +227,6 @@ rCER(CER, #diameter_service{capabilities = LCaps} = Svc) ->
                RCaps,
                CEA#diameter_base_CEA{'Result-Code' = ?SUCCESS})}.
 
-%% TODO: 5.3 of RFC 3588 says we MUST return DIAMETER_NO_COMMON_APPLICATION
-%%       in the CEA and SHOULD disconnect the transport. However, we have
-%%       no way to guarantee the send before disconnecting.
-
 build_CEA([], _, _, CEA) ->
     CEA#diameter_base_CEA{'Result-Code' = ?NOAPP};
 
@@ -292,25 +291,12 @@ to_cea(CER, Field, CEA) ->
         
 %% rCEA/2
 
-rCEA(#diameter_base_CEA{'Result-Code' = RC}
-     = CEA,
-     #diameter_service{capabilities = LCaps}
-     = Svc) ->
-    RC == ?SUCCESS orelse ?THROW({'Result-Code', RC}),
-
+rCEA(CEA, #diameter_service{capabilities = LCaps} = Svc) ->
     RCaps = capx_to_caps(CEA),
     SApps = common_applications(LCaps, RCaps, Svc),
-
-    [] == SApps andalso ?THROW(no_common_applications),
-
     IS = common_security(LCaps, RCaps),
 
-    [] == IS andalso ?THROW(no_common_security),
-
-    {SApps, IS, RCaps};
-
-rCEA(CEA, _Svc) ->
-    ?THROW({invalid, CEA}).
+    {SApps, IS, RCaps}.
 
 %% capx_to_caps/1
 

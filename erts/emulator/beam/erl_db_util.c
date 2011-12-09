@@ -35,6 +35,7 @@
 #include "bif.h"
 #include "big.h"
 #include "erl_binary.h"
+#include "erl_thr_progress.h"
 
 #include "erl_db_util.h"
 
@@ -495,7 +496,7 @@ static erts_smp_atomic32_t trace_control_word;
 
 /* This needs to be here, before the bif table... */
 
-static Eterm db_set_trace_control_word_fake_1(Process *p, Eterm val);
+static Eterm db_set_trace_control_word_fake_1(BIF_ALIST_1);
 
 /*
 ** The table of callable bif's, i e guard bif's and 
@@ -908,14 +909,18 @@ static void db_free_tmp_uncompressed(DbTerm* obj);
 /*
 ** Pseudo BIF:s to be callable from the PAM VM.
 */
-
-BIF_RETTYPE db_get_trace_control_word_0(Process *p) 
+BIF_RETTYPE db_get_trace_control_word(Process *p)
 {
     Uint32 tcw = (Uint32) erts_smp_atomic32_read_acqb(&trace_control_word);
     BIF_RET(erts_make_integer((Uint) tcw, p));
 }
 
-BIF_RETTYPE db_set_trace_control_word_1(Process *p, Eterm new) 
+BIF_RETTYPE db_get_trace_control_word_0(BIF_ALIST_0)
+{
+    BIF_RET(db_get_trace_control_word(BIF_P));
+}
+
+BIF_RETTYPE db_set_trace_control_word(Process *p, Eterm new)
 {
     Uint val;
     Uint32 old_tcw;
@@ -923,20 +928,27 @@ BIF_RETTYPE db_set_trace_control_word_1(Process *p, Eterm new)
 	BIF_ERROR(p, BADARG);
     if (val != ((Uint32)val))
 	BIF_ERROR(p, BADARG);
-    
+
     old_tcw = (Uint32) erts_smp_atomic32_xchg_relb(&trace_control_word,
 						   (erts_aint32_t) val);
     BIF_RET(erts_make_integer((Uint) old_tcw, p));
 }
 
-static Eterm db_set_trace_control_word_fake_1(Process *p, Eterm new) 
+BIF_RETTYPE db_set_trace_control_word_1(BIF_ALIST_1)
 {
+    BIF_RET(db_set_trace_control_word(BIF_P, BIF_ARG_1));
+}
+
+static Eterm db_set_trace_control_word_fake_1(BIF_ALIST_1)
+{
+    Process *p = BIF_P;
+    Eterm new = BIF_ARG_1;
     Uint val;
     if (!term_to_Uint(new, &val))
 	BIF_ERROR(p, BADARG);
     if (val != ((Uint32)val))
 	BIF_ERROR(p, BADARG);
-    BIF_RET(db_get_trace_control_word_0(p));
+    BIF_RET(db_get_trace_control_word(p));
 }
 
 /*
@@ -1704,6 +1716,7 @@ Eterm db_prog_match(Process *c_p, Binary *bprog,
     Process *current_scheduled;
     ErtsSchedulerData *esdp;
     Eterm (*bif)(Process*, ...);
+    Eterm bif_args[3];
     int fail_label;
     int atomic_trace;
 #if HALFWORD_HEAP
@@ -1734,14 +1747,14 @@ Eterm db_prog_match(Process *c_p, Binary *bprog,
 	if (! atomic_trace) {                               \
             erts_refc_inc(&bprog->refc, 2);                 \
 	    erts_smp_proc_unlock((p), ERTS_PROC_LOCK_MAIN); \
-	    erts_smp_block_system(0);                       \
+	    erts_smp_thr_progress_block();                  \
             atomic_trace = !0;                              \
 	}                                                   \
     } while (0)
 #define END_ATOMIC_TRACE(p)                               \
     do {                                                  \
 	if (atomic_trace) {                               \
-            erts_smp_release_system();                    \
+            erts_smp_thr_progress_unblock();              \
             erts_smp_proc_lock((p), ERTS_PROC_LOCK_MAIN); \
             if (erts_refc_dectest(&bprog->refc, 0) == 0) {\
                 erts_bin_free(bprog);                     \
@@ -1957,7 +1970,7 @@ restart:
 	    break;
 	case matchCall0:
 	    bif = (Eterm (*)(Process*, ...)) *pc++;
-	    t = (*bif)(build_proc);
+	    t = (*bif)(build_proc, bif_args);
 	    if (is_non_value(t)) {
 		if (do_catch)
 		    t = FAIL_TERM;
@@ -1968,7 +1981,7 @@ restart:
 	    break;
 	case matchCall1:
 	    bif = (Eterm (*)(Process*, ...)) *pc++;
-	    t = (*bif)(build_proc, esp[-1]);
+	    t = (*bif)(build_proc, esp-1);
 	    if (is_non_value(t)) {
 		if (do_catch)
 		    t = FAIL_TERM;
@@ -1979,7 +1992,9 @@ restart:
 	    break;
 	case matchCall2:
 	    bif = (Eterm (*)(Process*, ...)) *pc++;
-	    t = (*bif)(build_proc, esp[-1], esp[-2]);
+	    bif_args[0] = esp[-1];
+	    bif_args[1] = esp[-2];
+	    t = (*bif)(build_proc, bif_args);
 	    if (is_non_value(t)) {
 		if (do_catch)
 		    t = FAIL_TERM;
@@ -1991,7 +2006,10 @@ restart:
 	    break;
 	case matchCall3:
 	    bif = (Eterm (*)(Process*, ...)) *pc++;
-	    t = (*bif)(build_proc, esp[-1], esp[-2], esp[-3]);
+	    bif_args[0] = esp[-1];
+	    bif_args[1] = esp[-2];
+	    bif_args[2] = esp[-3];
+	    t = (*bif)(build_proc, bif_args);
 	    if (is_non_value(t)) {
 		if (do_catch)
 		    t = FAIL_TERM;
@@ -2846,7 +2864,9 @@ void* db_store_term_comp(DbTableCommon *tb, DbTerm* old, Uint offset, Eterm obj)
     Uint new_sz = offset + db_size_dbterm_comp(tb, obj);
     byte* basep;
     DbTerm* newp;
+#ifdef DEBUG
     byte* top;
+#endif
 
     ASSERT(tb->compress);
     if (old != 0) {
@@ -2868,7 +2888,10 @@ void* db_store_term_comp(DbTableCommon *tb, DbTerm* old, Uint offset, Eterm obj)
     }
 
     newp->size = size_object(obj);
-    top = copy_to_comp(tb, obj, newp, new_sz);
+#ifdef DEBUG
+    top = 
+#endif
+	copy_to_comp(tb, obj, newp, new_sz);
     ASSERT(top <= basep + new_sz);
 
     /* ToDo: Maybe realloc if ((basep+new_sz) - top) > WASTED_SPACE_LIMIT */
@@ -4970,7 +4993,7 @@ static Eterm match_spec_test(Process *p, Eterm against, Eterm spec, int trace)
 
 static Eterm seq_trace_fake(Process *p, Eterm arg1)
 {
-    Eterm result = seq_trace_info_1(p,arg1);
+    Eterm result = erl_seq_trace_info(p, arg1);
     if (is_tuple(result) && *tuple_val(result) == 2) {
 	return (tuple_val(result))[2];
     }

@@ -175,6 +175,8 @@ expand_opt(r12, Os) ->
     [no_recv_opt,no_line_info|Os];
 expand_opt(r13, Os) ->
     [no_recv_opt,no_line_info|Os];
+expand_opt(r14, Os) ->
+    [no_line_info|Os];
 expand_opt({debug_info_key,_}=O, Os) ->
     [encrypt_debug_info,O|Os];
 expand_opt(no_float_opt, Os) ->
@@ -235,7 +237,8 @@ format_error({module_name,Mod,Filename}) ->
 		  code=[],
 		  core_code=[],
 		  abstract_code=[],		%Abstract code for debugger.
-		  options=[]  :: [option()],
+		  options=[]  :: [option()],	%Options for compilation
+		  mod_options=[]  :: [option()], %Options for module_info
 		  errors=[],
 		  warnings=[]}).
 
@@ -246,10 +249,11 @@ internal(Master, Input, Opts) ->
 
 internal({forms,Forms}, Opts) ->
     {_,Ps} = passes(forms, Opts),
-    internal_comp(Ps, "", "", #compile{code=Forms,options=Opts});
+    internal_comp(Ps, "", "", #compile{code=Forms,options=Opts,
+				       mod_options=Opts});
 internal({file,File}, Opts) ->
     {Ext,Ps} = passes(file, Opts),
-    Compile = #compile{options=Opts},
+    Compile = #compile{options=Opts,mod_options=Opts},
     internal_comp(Ps, File, Ext, Compile).
 
 internal_comp(Passes, File, Suffix, St0) ->
@@ -629,7 +633,9 @@ asm_passes() ->
 	 {iff,dbool,{listing,"bool"}},
 	 {unless,no_topt,{pass,beam_type}},
 	 {iff,dtype,{listing,"type"}},
-	 {pass,beam_dead},	      %Must always run since it splits blocks.
+	 {pass,beam_split},
+	 {iff,dsplit,{listing,"split"}},
+	 {unless,no_dead,{pass,beam_dead}},
 	 {iff,ddead,{listing,"dead"}},
 	 {unless,no_jopt,{pass,beam_jump}},
 	 {iff,djmp,{listing,"jump"}},
@@ -1228,12 +1234,13 @@ beam_unused_labels(#compile{code=Code0}=St) ->
     Code = beam_jump:module_labels(Code0),
     {ok,St#compile{code=Code}}.
 
-beam_asm(#compile{ifile=File,code=Code0,abstract_code=Abst,options=Opts0}=St) ->
+beam_asm(#compile{ifile=File,code=Code0,
+		  abstract_code=Abst,mod_options=Opts0}=St) ->
     Source = filename:absname(File),
     Opts1 = lists:map(fun({debug_info_key,_}) -> {debug_info_key,'********'};
 			 (Other) -> Other
 		      end, Opts0),
-    Opts2 = [O || O <- Opts1, is_informative_option(O)],
+    Opts2 = [O || O <- Opts1, effects_code_generation(O)],
     case beam_asm:module(Code0, Abst, Source, Opts2) of
 	{ok,Code} -> {ok,St#compile{code=Code,abstract_code=[]}}
     end.
@@ -1303,15 +1310,23 @@ embed_native_code(St, {Architecture,NativeCode}) ->
     {ok, BeamPlusNative} = beam_lib:build_module(Chunks),
     St#compile{code=BeamPlusNative}.
 
-%% Returns true if the option is informative and therefore should be included
-%% in the option list of the compiled module.
+%% effects_code_generation(Option) -> true|false.
+%%  Determine whether the option could have any effect on the
+%%  generated code in the BEAM file (as opposed to how
+%%  errors will be reported).
 
-is_informative_option(beam) -> false;
-is_informative_option(report_warnings) -> false;
-is_informative_option(report_errors) -> false;
-is_informative_option(binary) -> false;
-is_informative_option(verbose) -> false;
-is_informative_option(_) -> true.
+effects_code_generation(Option) ->
+    case Option of 
+	beam -> false;
+	report_warnings -> false;
+	report_errors -> false;
+	return_errors-> false;
+	return_warnings-> false;
+	binary -> false;
+	verbose -> false;
+	{cwd,_} -> false;
+	_ -> true
+    end.
 
 save_binary(#compile{code=none}=St) -> {ok,St};
 save_binary(#compile{module=Mod,ofile=Outfile,

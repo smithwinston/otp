@@ -29,7 +29,8 @@
 	 end_per_testcase/2]).
 
 %% Internal export
--export([init/1, terminate_all_children/1]).
+-export([init/1, terminate_all_children/1,
+         middle9212/0, gen_server9212/0, handle_info/2]).
 
 %% API tests
 -export([ sup_start_normal/1, sup_start_ignore_init/1, 
@@ -58,7 +59,8 @@
 -export([child_unlink/1, tree/1, count_children_memory/1,
 	 do_not_save_start_parameters_for_temporary_children/1,
 	 do_not_save_child_specs_for_temporary_children/1,
-	 simple_one_for_one_scale_many_temporary_children/1]).
+	 simple_one_for_one_scale_many_temporary_children/1,
+         simple_global_supervisor/1]).
 
 %%-------------------------------------------------------------------------
 
@@ -77,7 +79,8 @@ all() ->
      {group, abnormal_termination}, child_unlink, tree,
      count_children_memory, do_not_save_start_parameters_for_temporary_children,
      do_not_save_child_specs_for_temporary_children,
-     simple_one_for_one_scale_many_temporary_children, temporary_bystander].
+     simple_one_for_one_scale_many_temporary_children, temporary_bystander,
+     simple_global_supervisor].
 
 groups() -> 
     [{sup_start, [],
@@ -120,7 +123,9 @@ end_per_group(_GroupName, Config) ->
 
 init_per_testcase(count_children_memory, Config) ->
     try erlang:memory() of
-	_ -> Config
+	_ ->
+	    erts_debug:set_internal_state(available_internal_state, true),
+	    Config
     catch error:notsup ->
 	    {skip, "+Meamin used during test; erlang:memory/1 not available"}
     end;
@@ -128,6 +133,9 @@ init_per_testcase(_Case, Config) ->
     erlang:display(_Case),
     Config.
 
+end_per_testcase(count_children_memory, _Config) ->
+    catch erts_debug:set_internal_state(available_internal_state, false),
+    ok;
 end_per_testcase(_Case, _Config) ->
     ok.
 
@@ -1136,25 +1144,25 @@ count_children_memory(Config) when is_list(Config) ->
     [supervisor:start_child(sup_test, []) || _Ignore <- lists:seq(1,1000)],
 
     garbage_collect(),
-    _Size1 = erlang:memory(processes_used),
+    _Size1 = proc_memory(),
     Children = supervisor:which_children(sup_test),
-    _Size2 = erlang:memory(processes_used),
+    _Size2 = proc_memory(),
     ChildCount = get_child_counts(sup_test),
-    _Size3 = erlang:memory(processes_used),
+    _Size3 = proc_memory(),
 
     [supervisor:start_child(sup_test, []) || _Ignore2 <- lists:seq(1,1000)],
 
     garbage_collect(),
     Children2 = supervisor:which_children(sup_test),
-    Size4 = erlang:memory(processes_used),
+    Size4 = proc_memory(),
     ChildCount2 = get_child_counts(sup_test),
-    Size5 = erlang:memory(processes_used),
+    Size5 = proc_memory(),
 
     garbage_collect(),
     Children3 = supervisor:which_children(sup_test),
-    Size6 = erlang:memory(processes_used),
+    Size6 = proc_memory(),
     ChildCount3 = get_child_counts(sup_test),
-    Size7 = erlang:memory(processes_used),
+    Size7 = proc_memory(),
 
     1000 = length(Children),
     [1,1000,0,1000] = ChildCount,
@@ -1179,6 +1187,10 @@ count_children_memory(Config) when is_list(Config) ->
 
     [terminate(SupPid, Pid, child, kill) || {undefined, Pid, worker, _Modules} <- Children3],
     [1,0,0,0] = get_child_counts(sup_test).
+
+proc_memory() ->
+    erts_debug:set_internal_state(wait, deallocations),
+    erlang:memory(processes_used).
 
 %%-------------------------------------------------------------------------
 do_not_save_start_parameters_for_temporary_children(doc) ->
@@ -1378,6 +1390,92 @@ terminate_all_children([C|Cs]) ->
 terminate_all_children([]) ->
     done.
 
+
+%%-------------------------------------------------------------------------
+%% OTP-9212. Restart of global supervisor.
+simple_global_supervisor(_Config) ->
+    kill_supervisor(),
+    kill_worker(),
+    exit_worker(),
+    restart_worker(),
+    ok.
+
+kill_supervisor() ->
+    {Top, Sup2_1, Server_1} = start9212(),
+
+    %% Killing a supervisor isn't really supported, but try it anyway...
+    exit(Sup2_1, kill),
+    timer:sleep(200),
+    Sup2_2 = global:whereis_name(sup2),
+    Server_2 = global:whereis_name(server),
+    true = is_pid(Sup2_2),
+    true = is_pid(Server_2),
+    true = Sup2_1 =/= Sup2_2,
+    true = Server_1 =/= Server_2,
+
+    stop9212(Top).
+
+handle_info({fail, With, After}, _State) ->
+    timer:sleep(After),
+    erlang:error(With).
+
+kill_worker() ->
+    {Top, _Sup2, Server_1} = start9212(),
+    exit(Server_1, kill),
+    timer:sleep(200),
+    Server_2 = global:whereis_name(server),
+    true = is_pid(Server_2),
+    true = Server_1 =/= Server_2,
+    stop9212(Top).
+
+exit_worker() ->
+    %% Very much the same as kill_worker().
+    {Top, _Sup2, Server_1} = start9212(),
+    Server_1 ! {fail, normal, 0},
+    timer:sleep(200),
+    Server_2 = global:whereis_name(server),
+    true = is_pid(Server_2),
+    true = Server_1 =/= Server_2,
+    stop9212(Top).
+
+restart_worker() ->
+    {Top, _Sup2, Server_1} = start9212(),
+    ok = supervisor:terminate_child({global, sup2}, child),
+    {ok, _Child} = supervisor:restart_child({global, sup2}, child),
+    Server_2 = global:whereis_name(server),
+    true = is_pid(Server_2),
+    true = Server_1 =/= Server_2,
+    stop9212(Top).
+
+start9212() ->
+    Middle = {middle,{?MODULE,middle9212,[]}, permanent,2000,supervisor,[]},
+    InitResult = {ok, {{one_for_all,3,60}, [Middle]}},
+    {ok, TopPid} = start_link(InitResult),
+
+    Sup2 = global:whereis_name(sup2),
+    Server = global:whereis_name(server),
+    true = is_pid(Sup2),
+    true = is_pid(Server),
+    {TopPid, Sup2, Server}.
+
+stop9212(Top) ->
+    Old = process_flag(trap_exit, true),
+    exit(Top, kill),
+    timer:sleep(200),
+    undefined = global:whereis_name(sup2),
+    undefined = global:whereis_name(server),
+    check_exit([Top]),
+    _ = process_flag(trap_exit, Old),
+    ok.
+
+middle9212() ->
+    Child = {child, {?MODULE,gen_server9212,[]},permanent, 2000, worker, []},
+    InitResult = {ok, {{one_for_all,3,60}, [Child]}},
+    supervisor:start_link({global,sup2}, ?MODULE, InitResult).
+
+gen_server9212() ->
+    InitResult = {ok, []},
+    gen_server:start_link({global,server}, ?MODULE, InitResult, []).
 
 
 %%-------------------------------------------------------------------------

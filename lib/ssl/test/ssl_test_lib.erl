@@ -22,6 +22,7 @@
 
 -include("test_server.hrl").
 -include("test_server_line.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 %% Note: This directive should only be used in test suites.
 -compile(export_all).
@@ -661,6 +662,9 @@ cipher_result(Socket, Result) ->
     %% to properly test "cipher state" handling
     ssl:send(Socket, "Hello\n"),
     receive 
+	{ssl, Socket, "H"} ->
+	    ssl:send(Socket, " world\n"),
+	    receive_rizzo_duong_beast();
 	{ssl, Socket, "Hello\n"} ->
 	    ssl:send(Socket, " world\n"),
 	    receive
@@ -673,3 +677,34 @@ cipher_result(Socket, Result) ->
 
 session_info_result(Socket) ->
     ssl:session_info(Socket).
+
+
+public_key(#'PrivateKeyInfo'{privateKeyAlgorithm =
+				 #'PrivateKeyInfo_privateKeyAlgorithm'{algorithm = ?rsaEncryption},
+			     privateKey = Key}) ->
+    public_key:der_decode('RSAPrivateKey', iolist_to_binary(Key));
+
+public_key(#'PrivateKeyInfo'{privateKeyAlgorithm =
+				 #'PrivateKeyInfo_privateKeyAlgorithm'{algorithm = ?'id-dsa'},
+			     privateKey = Key}) ->
+    public_key:der_decode('DSAPrivateKey', iolist_to_binary(Key));
+public_key(Key) ->
+    Key.
+receive_rizzo_duong_beast() ->
+    receive 
+	{ssl, _, "ello\n"} ->
+	    receive 
+		{ssl, _, " "} ->
+		    receive
+			{ssl, _, "world\n"} ->
+			    ok
+		    end
+	    end
+    end.
+
+state([{data,[{"State", State}]} | _]) ->
+    State;
+state([{data,[{"StateData", State}]} | _]) ->
+    State;
+state([_ | Rest]) ->
+    state(Rest).

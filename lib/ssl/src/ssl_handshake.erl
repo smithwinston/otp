@@ -447,7 +447,7 @@ server_hello_done() ->
 -spec encode_handshake(tls_handshake(), tls_version()) -> iolist().
 %%     
 %% Description: Encode a handshake packet to binary
-%%--------------------------------------------------------------------
+%%--------------------------------------------------------------------x
 encode_handshake(Package, Version) ->
     {MsgType, Bin} = enc_hs(Package, Version),
     Len = byte_size(Bin),
@@ -1092,18 +1092,12 @@ certificate_authorities(CertDbHandle, CertDbRef) ->
     list_to_binary([Enc(Cert) || {_, Cert} <- Authorities]).
 
 certificate_authorities_from_db(CertDbHandle, CertDbRef) ->
-    certificate_authorities_from_db(CertDbHandle, CertDbRef, no_candidate, []).
-
-certificate_authorities_from_db(CertDbHandle,CertDbRef, PrevKey, Acc) ->
-    case ssl_manager:issuer_candidate(PrevKey, CertDbHandle) of
-	no_more_candidates ->
-	    lists:reverse(Acc);
-	{{CertDbRef, _, _} = Key, Cert} ->
-	    certificate_authorities_from_db(CertDbHandle, CertDbRef, Key, [Cert|Acc]);
-	{Key, _Cert} ->
-	    %% skip certs not from this ssl connection
-	    certificate_authorities_from_db(CertDbHandle, CertDbRef, Key, Acc)
-    end.
+    ConnectionCerts = fun({{Ref, _, _}, Cert}, Acc) when Ref  == CertDbRef ->
+			      [Cert | Acc];
+			 (_, Acc) ->
+			      Acc
+		      end,	
+    ssl_certificate_db:foldl(ConnectionCerts, [], CertDbHandle).
 
 digitally_signed(Hash, #'RSAPrivateKey'{} = Key) ->
     public_key:encrypt_private(Hash, Key,

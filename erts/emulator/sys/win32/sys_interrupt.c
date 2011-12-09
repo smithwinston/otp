@@ -19,8 +19,12 @@
 /*
  * Purpose: Interrupt handling in windows.
  */
+#ifdef HAVE_CONFIG_H
+#  include "config.h"
+#endif
 #include "sys.h"
 #include "erl_alloc.h"
+#include "erl_thr_progress.h"
 #include "erl_driver.h"
 #include "../../drivers/win32/win_con.h"
 
@@ -52,14 +56,14 @@ void erts_do_break_handling(void)
      * therefore, make sure that all threads but this one are blocked before
      * proceeding!
      */
-    erts_smp_block_system(0);
+    erts_smp_thr_progress_block();
     /* call the break handling function, reset the flag */
     do_break();
 
     ResetEvent(erts_sys_break_event);
     ERTS_UNSET_BREAK_REQUESTED;
 
-    erts_smp_release_system();
+    erts_smp_thr_progress_unblock();
 }
 
 

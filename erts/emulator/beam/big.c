@@ -310,12 +310,12 @@
 #define DREM(a1,a0,b,r) do {				\
 	ErtsDigit __a1 = (a1);				\
 	ErtsDigit __b = (b);				\
-	ErtsDigit __q0;					\
+	ERTS_DECLARE_DUMMY(ErtsDigit __q0);		\
 	DDIVREM((__a1 % __b), (a0), __b, __q0, r);	\
     } while(0)
 
 #define DDIV(a1,a0,b,q)	do {			\
-	ErtsDigit _tmp;				\
+	ERTS_DECLARE_DUMMY(ErtsDigit _tmp);	\
 	DDIVREM(a1,a0,b,q,_tmp);		\
     } while(0)
 
@@ -413,8 +413,8 @@
     } while(0)
 
 #define DDIV2(a1,a0,b1,b0,q) do {		\
-	ErtsDigit _tmp_r1;			\
-	ErtsDigit _tmp_r0;			\
+	ERTS_DECLARE_DUMMY(ErtsDigit _tmp_r1);	\
+	ERTS_DECLARE_DUMMY(ErtsDigit _tmp_r0);	 \
 	D2DIVREM(a1,a0,b1,b0,q,_tmp_r1,_tmp_r0); \
     } while(0)
 
@@ -810,7 +810,9 @@ static dsize_t D_div(ErtsDigit* x, dsize_t xl, ErtsDigit d, ErtsDigit* q, ErtsDi
     }
 
     do {
-	ErtsDigit q0, a0, b1, b0, b;
+	ErtsDigit q0, a0, b0;
+	ERTS_DECLARE_DUMMY(ErtsDigit b);
+	ERTS_DECLARE_DUMMY(ErtsDigit b1);
 
 	if (d > a1) {
 	    a0 = *xp; 
@@ -1323,7 +1325,7 @@ static dsize_t I_lshift(ErtsDigit* x, dsize_t xl, Sint y,
 	return 1;
     }
     else {
-	long ay = (y < 0) ? -y : y;
+	SWord ay = (y < 0) ? -y : y;
 	int bw = ay / D_EXP;
 	int sw = ay % D_EXP;
 	dsize_t rl;
@@ -1446,6 +1448,20 @@ erts_make_integer(Uint x, Process *p)
     else {
 	hp = HAlloc(p, BIG_UINT_HEAP_SIZE);
 	return uint_to_big(x,hp);
+    }
+}
+/*
+ * As erts_make_integer, but from a whole UWord.
+ */
+Eterm
+erts_make_integer_from_uword(UWord x, Process *p)
+{
+    Eterm* hp;
+    if (IS_USMALL(0,x))
+	return make_small(x);
+    else {
+	hp = HAlloc(p, BIG_UWORD_HEAP_SIZE(x));
+	return uword_to_big(x,hp);
     }
 }
 
@@ -1582,6 +1598,62 @@ big_to_double(Wterm x, double* resp)
     __ERTS_FP_ERROR(fpexnp,*resp,;);
     __ERTS_RESTORE_FP_EXCEPTION(fpexnp);
     return 0;
+}
+
+/*
+ * Logic has been copied from erl_bif_guard.c and slightly
+ * modified to use a static instead of dynamic heap
+ */
+Eterm
+double_to_big(double x, Eterm *heap)
+{
+    int is_negative;
+    int ds;
+    ErtsDigit* xp;
+    Eterm res;
+    int i;
+    size_t sz;
+    Eterm* hp;
+    double dbase;
+
+    if (x >= 0) {
+	is_negative = 0;
+    } else {
+	is_negative = 1;
+	x = -x;
+    }
+
+    /* Unscale & (calculate exponent) */
+    ds = 0;
+    dbase = ((double) (D_MASK) + 1);
+    while (x >= 1.0) {
+	x /= dbase; /* "shift" right */
+	ds++;
+    }
+    sz = BIG_NEED_SIZE(ds); /* number of words including arity */
+
+    hp = heap;
+    res = make_big(hp);
+    xp = (ErtsDigit*) (hp + 1);
+
+    for (i = ds - 1; i >= 0; i--) {
+	ErtsDigit d;
+
+	x *= dbase; /* "shift" left */
+	d = x; /* trunc */
+	xp[i] = d; /* store digit */
+	x -= d; /* remove integer part */
+    }
+    while ((ds & (BIG_DIGITS_PER_WORD - 1)) != 0) {
+	xp[ds++] = 0;
+    }
+
+    if (is_negative) {
+	*hp = make_neg_bignum_header(sz-1);
+    } else {
+	*hp = make_pos_bignum_header(sz-1);
+    }
+    return res;
 }
 
 

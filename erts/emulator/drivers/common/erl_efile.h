@@ -67,6 +67,11 @@
 #define FILENAMES_16BIT 1
 #endif
 
+// We use sendfilev if it exist on solaris
+#if !defined(HAVE_SENDFILE) && defined(HAVE_SENDFILEV)
+#define HAVE_SENDFILE
+#endif
+
 /*
  * An handle to an open directory.  To be cast to the correct type
  * in the system-dependent directory functions.
@@ -85,14 +90,15 @@ typedef struct _Efile_error {
 /*
  * This structure contains date and time.
  */
-typedef struct _Efile_time {
-    unsigned year;		/* (4 digits). */
-    unsigned month;		/* (1..12). */
-    unsigned day;		/* (1..31). */
-    unsigned hour;		/* (0..23). */
-    unsigned minute;		/* (0..59). */
-    unsigned second;		/* (0..59). */
-} Efile_time;
+
+//typedef struct _Efile_time {
+//    unsigned year;		/* (4 digits). */
+//    unsigned month;		/* (1..12). */
+//    unsigned day;		/* (1..31). */
+//    unsigned hour;		/* (0..23). */
+//    unsigned minute;		/* (0..59). */
+//    unsigned second;		/* (0..59). */
+//} Efile_time;
 
 
 /*
@@ -111,12 +117,25 @@ typedef struct _Efile_info {
     Uint32 inode;		/* Inode number. */
     Uint32 uid;			/* User id of owner. */
     Uint32 gid;			/* Group id of owner. */
-    Efile_time accessTime;	/* Last time the file was accessed. */
-    Efile_time modifyTime;	/* Last time the file was modified. */
-    Efile_time cTime;		/* Creation time (Windows) or last
+    time_t accessTime;		/* Last time the file was accessed. */
+    time_t modifyTime;		/* Last time the file was modified. */
+    time_t cTime;		/* Creation time (Windows) or last
 				 * inode change (Unix).
 				 */
 } Efile_info;
+
+
+#ifdef HAVE_SENDFILE
+/*
+ * Describes the structure of headers/trailers for sendfile
+ */
+struct t_sendfile_hdtl {
+    SysIOVec *headers;
+    int hdr_cnt;
+    SysIOVec *trailers;
+    int trl_cnt;
+};
+#endif /* HAVE_SENDFILE */
 
 /*
  * Functions.
@@ -162,3 +181,7 @@ int efile_symlink(Efile_error* errInfo, char* old, char* new);
 int efile_may_openfile(Efile_error* errInfo, char *name);
 int efile_fadvise(Efile_error* errInfo, int fd, Sint64 offset, Sint64 length,
 		  int advise);
+#ifdef HAVE_SENDFILE
+int efile_sendfile(Efile_error* errInfo, int in_fd, int out_fd,
+		      off_t *offset, Uint64 *nbytes, struct t_sendfile_hdtl *hdtl);
+#endif /* HAVE_SENDFILE */

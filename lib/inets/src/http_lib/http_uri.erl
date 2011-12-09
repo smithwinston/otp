@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2010. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2011. All Rights Reserved.
 %%
 %% The contents of this file are subject to the Erlang Public License,
 %% Version 1.1, (the "License"); you may not use this file except in
@@ -16,23 +16,30 @@
 %%
 %% %CopyrightEnd%
 %%
-%%
+%% 
+%% RFC 3986
+%% 
 
 -module(http_uri).
 
--export([parse/1, encode/1, decode/1]).
+-export([parse/1, parse/2, 
+	 encode/1, decode/1]).
+
 
 %%%=========================================================================
 %%%  API
 %%%=========================================================================
 parse(AbsURI) ->
+    parse(AbsURI, []).
+
+parse(AbsURI, Opts) ->
     case parse_scheme(AbsURI) of
 	{error, Reason} ->
 	    {error, Reason};
 	{Scheme, Rest} ->
-	    case (catch parse_uri_rest(Scheme, Rest)) of
+	    case (catch parse_uri_rest(Scheme, Rest, Opts)) of
 		{UserInfo, Host, Port, Path, Query} ->
-		    {Scheme, UserInfo, Host, Port, Path, Query};
+		    {ok, {Scheme, UserInfo, Host, Port, Path, Query}};
 		_  ->
 		    {error, {malformed_url, AbsURI}}
 	    end
@@ -42,35 +49,38 @@ encode(URI) ->
     Reserved = sets:from_list([$;, $:, $@, $&, $=, $+, $,, $/, $?,
 			       $#, $[, $], $<, $>, $\", ${, $}, $|,
 			       $\\, $', $^, $%, $ ]),
-    lists:append(lists:map(fun(Char) ->
-				   uri_encode(Char, Reserved)
-			   end, URI)).
+    %% lists:append(lists:map(fun(Char) -> uri_encode(Char, Reserved) end, URI)).
+    lists:append([uri_encode(Char, Reserved) || Char <- URI]).
 
-decode([$%,Hex1,Hex2|Rest]) ->
-    [hex2dec(Hex1)*16+hex2dec(Hex2)|decode(Rest)];
-decode([First|Rest]) ->
-    [First|decode(Rest)];
-decode([]) ->
+decode(String) ->
+    do_decode(String).
+
+do_decode([$%,Hex1,Hex2|Rest]) ->
+    [hex2dec(Hex1)*16+hex2dec(Hex2)|do_decode(Rest)];
+do_decode([First|Rest]) ->
+    [First|do_decode(Rest)];
+do_decode([]) ->
     [].
+
 
 %%%========================================================================
 %%% Internal functions
 %%%========================================================================
+
 parse_scheme(AbsURI) ->
     case split_uri(AbsURI, ":", {error, no_scheme}, 1, 1) of
 	{error, no_scheme} ->
 	    {error, no_scheme};
 	{StrScheme, Rest} ->
 	    case list_to_atom(http_util:to_lower(StrScheme)) of
-		Scheme when Scheme == http; Scheme == https ->
+		Scheme when (Scheme =:= http) orelse (Scheme =:= https) ->
 		    {Scheme, Rest};
 		Scheme ->
 		    {error, {not_supported_scheme, Scheme}}
 	    end
     end.
 
-parse_uri_rest(Scheme, "//" ++ URIPart) ->
-
+parse_uri_rest(Scheme, "//" ++ URIPart, Opts) ->
     {Authority, PathQuery} =
 	case split_uri(URIPart, "/", URIPart, 1, 0) of
 	    Split = {_, _} ->
@@ -85,8 +95,8 @@ parse_uri_rest(Scheme, "//" ++ URIPart) ->
 	end,
 
     {UserInfo, HostPort} = split_uri(Authority, "@", {"", Authority}, 1, 1),
-    {Host, Port} = parse_host_port(Scheme, HostPort),
-    {Path, Query} = parse_path_query(PathQuery),
+    {Host, Port}         = parse_host_port(Scheme, HostPort, Opts),
+    {Path, Query}        = parse_path_query(PathQuery),
     {UserInfo, Host, Port, Path, Query}.
 
 
@@ -94,13 +104,14 @@ parse_path_query(PathQuery) ->
     {Path, Query} =  split_uri(PathQuery, "\\?", {PathQuery, ""}, 1, 0),
     {path(Path), Query}.
 
-parse_host_port(Scheme,"[" ++ HostPort) -> %ipv6
+parse_host_port(Scheme,"[" ++ HostPort, Opts) -> %ipv6
     DefaultPort = default_port(Scheme),
     {Host, ColonPort} = split_uri(HostPort, "\\]", {HostPort, ""}, 1, 1),
+    Host2 = maybe_ipv6_host_with_brackets(Host, Opts),
     {_, Port} = split_uri(ColonPort, ":", {"", DefaultPort}, 0, 1),
-    {Host, int_port(Port)};
+    {Host2, int_port(Port)};
 
-parse_host_port(Scheme, HostPort) ->
+parse_host_port(Scheme, HostPort, _Opts) ->
     DefaultPort = default_port(Scheme),
     {Host, Port} = split_uri(HostPort, ":", {HostPort, DefaultPort}, 1, 1),
     {Host, int_port(Port)}.
@@ -112,6 +123,14 @@ split_uri(UriPart, SplitChar, NoMatchResult, SkipLeft, SkipRight) ->
 	     string:substr(UriPart, Match + SkipRight, length(UriPart))};
 	nomatch ->
 	    NoMatchResult
+    end.
+
+maybe_ipv6_host_with_brackets(Host, Opts) ->
+    case lists:keysearch(ipv6_host_with_brackets, 1, Opts) of
+	{value, {ipv6_host_with_brackets, true}} ->
+	    "[" ++ Host ++ "]";
+	_ ->
+	    Host
     end.
 
 default_port(http) ->

@@ -25,9 +25,9 @@
 -export([md4/1, md4_init/0, md4_update/2, md4_final/1]).
 -export([md5/1, md5_init/0, md5_update/2, md5_final/1]).
 -export([sha/1, sha_init/0, sha_update/2, sha_final/1]).
-%-export([sha256/1, sha256_init/0, sha256_update/2, sha256_final/1]).
-%-export([sha512/1, sha512_init/0, sha512_update/2, sha512_final/1]).
--export([md5_mac/2, md5_mac_96/2, sha_mac/2, sha_mac_96/2]).
+-export([sha256/1, sha256_init/0, sha256_update/2, sha256_final/1]).
+-export([sha512/1, sha512_init/0, sha512_update/2, sha512_final/1]).
+-export([md5_mac/2, md5_mac_96/2, sha_mac/2, sha_mac/3, sha_mac_96/2]).
 -export([hmac_init/2, hmac_update/2, hmac_final/1, hmac_final_n/2]).
 -export([des_cbc_encrypt/3, des_cbc_decrypt/3, des_cbc_ivec/1]).
 -export([des_ecb_encrypt/2, des_ecb_decrypt/2]).
@@ -42,7 +42,7 @@
 -export([aes_cfb_128_encrypt/3, aes_cfb_128_decrypt/3]).
 -export([exor/2]).
 -export([rc4_encrypt/2, rc4_set_key/1, rc4_encrypt_with_state/2]).
--export([rc2_40_cbc_encrypt/3, rc2_40_cbc_decrypt/3]).
+-export([rc2_cbc_encrypt/3, rc2_cbc_decrypt/3, rc2_40_cbc_encrypt/3, rc2_40_cbc_decrypt/3]).
 -export([dss_verify/3, dss_verify/4, rsa_verify/3, rsa_verify/4]).
 -export([dss_sign/2, dss_sign/3, rsa_sign/2, rsa_sign/3]).
 -export([rsa_public_encrypt/3, rsa_private_decrypt/3]).
@@ -64,8 +64,8 @@
 -define(FUNC_LIST, [md4, md4_init, md4_update, md4_final,
 		    md5, md5_init, md5_update, md5_final,
 		    sha, sha_init, sha_update, sha_final,
-%% 		    sha256, sha256_init, sha256_update, sha256_final,
-%% 		    sha512, sha512_init, sha512_update, sha512_final,
+ 		    sha256, sha256_init, sha256_update, sha256_final,
+ 		    sha512, sha512_init, sha512_update, sha512_final,
 		    md5_mac,  md5_mac_96,
 		    sha_mac,  sha_mac_96,
                     sha_mac_init, sha_mac_update, sha_mac_final,
@@ -83,7 +83,7 @@
 		    dss_verify,dss_sign,
 		    rsa_verify,rsa_sign,
 		    rsa_public_encrypt,rsa_private_decrypt, 
-		    rsa_private_encrypt,rsa_public_decrypt, 
+		    rsa_private_encrypt,rsa_public_decrypt,
 		    dh_generate_key, dh_compute_key,
 		    aes_cbc_128_encrypt, aes_cbc_128_decrypt,
 		    exor,
@@ -91,11 +91,11 @@
 		    rc2_40_cbc_encrypt, rc2_40_cbc_decrypt,
 		    %% idea_cbc_encrypt, idea_cbc_decrypt,
 		    aes_cbc_256_encrypt, aes_cbc_256_decrypt,
-            aes_ctr_encrypt, aes_ctr_decrypt,
+		    aes_ctr_encrypt, aes_ctr_decrypt,
                     aes_ctr_stream_init, aes_ctr_stream_encrypt, aes_ctr_stream_decrypt,
 		    info_lib]).
 
--type rsa_digest_type() :: 'md5' | 'sha'.
+-type rsa_digest_type() :: 'md5' | 'sha' | 'sha256' | 'sha384' | 'sha512'.
 -type dss_digest_type() :: 'none' | 'sha'.
 -type crypto_integer() :: binary() | integer().
 
@@ -219,6 +219,73 @@ sha_init() -> ?nif_stub.
 sha_update(_Context, _Data) -> ?nif_stub.
 sha_final(_Context) -> ?nif_stub.
 
+%
+%% SHA256
+%%
+-spec sha256(iodata()) -> binary().
+-spec sha256_init() -> binary().
+-spec sha256_update(binary(), iodata()) -> binary().
+-spec sha256_final(binary()) -> binary().
+
+sha256(Data) ->
+    case sha256_nif(Data) of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+sha256_init() ->
+    case sha256_init_nif() of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+sha256_update(Context, Data) ->
+    case sha256_update_nif(Context, Data) of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+sha256_final(Context) ->
+    case sha256_final_nif(Context) of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+
+sha256_nif(_Data) -> ?nif_stub.
+sha256_init_nif() -> ?nif_stub.
+sha256_update_nif(_Context, _Data) -> ?nif_stub.
+sha256_final_nif(_Context) -> ?nif_stub.
+
+%
+%% SHA512
+%%
+-spec sha512(iodata()) -> binary().
+-spec sha512_init() -> binary().
+-spec sha512_update(binary(), iodata()) -> binary().
+-spec sha512_final(binary()) -> binary().
+
+sha512(Data) ->
+    case sha512_nif(Data) of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+sha512_init() ->
+    case sha512_init_nif() of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+sha512_update(Context, Data) ->
+    case sha512_update_nif(Context, Data) of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+sha512_final(Context) ->
+    case sha512_final_nif(Context) of
+	notsup -> erlang:error(notsup);
+	Bin -> Bin
+    end.
+
+sha512_nif(_Data) -> ?nif_stub.
+sha512_init_nif() -> ?nif_stub.
+sha512_update_nif(_Context, _Data) -> ?nif_stub.
+sha512_final_nif(_Context) -> ?nif_stub.
 
 %%
 %%  MESSAGE AUTHENTICATION CODES
@@ -259,6 +326,9 @@ md5_mac_n(_Key,_Data,_MacSz) -> ?nif_stub.
 
 sha_mac(Key, Data) ->
     sha_mac_n(Key,Data,20).
+
+sha_mac(Key, Data, Size) ->
+    sha_mac_n(Key, Data, Size).
 
 sha_mac_96(Key, Data) ->
     sha_mac_n(Key,Data,12).
@@ -519,8 +589,14 @@ dss_verify(_Type,_Data,_Signature,_Key) -> ?nif_stub.
 
 % Key = [E,N]  E=PublicExponent N=PublicModulus
 rsa_verify(Data,Signature,Key) ->
-    rsa_verify(sha, Data,Signature,Key).
-rsa_verify(_Type,_Data,_Signature,_Key) -> ?nif_stub.
+    rsa_verify_nif(sha, Data,Signature,Key).
+rsa_verify(Type, Data, Signature, Key) ->
+    case rsa_verify_nif(Type, Data, Signature, Key) of
+    	notsup -> erlang:error(notsup);
+	Bool -> Bool
+    end.
+
+rsa_verify_nif(_Type, _Data, _Signature, _Key) -> ?nif_stub.
 
 
 %%
@@ -689,16 +765,25 @@ rc4_encrypt(_Key, _Data) -> ?nif_stub.
 rc4_set_key(_Key) -> ?nif_stub.
 rc4_encrypt_with_state(_State, _Data) -> ?nif_stub.
 
-%%
-%% RC2 - 40 bits block cipher
-%%
-rc2_40_cbc_encrypt(Key, IVec, Data) ->
-    rc2_40_cbc_crypt(Key,IVec,Data,true).
 
-rc2_40_cbc_decrypt(Key, IVec, Data) ->
-    rc2_40_cbc_crypt(Key,IVec,Data,false).
+%% RC2 block cipher
 
-rc2_40_cbc_crypt(_Key, _IVec, _Data, _IsEncrypt) -> ?nif_stub.    
+rc2_cbc_encrypt(Key, IVec, Data) ->
+    rc2_cbc_crypt(Key,IVec,Data,true).
+
+rc2_cbc_decrypt(Key, IVec, Data) ->
+    rc2_cbc_crypt(Key,IVec,Data,false).
+
+rc2_cbc_crypt(_Key, _IVec, _Data, _IsEncrypt) -> ?nif_stub.
+
+%%
+%% RC2 - 40 bits block cipher - Backwards compatibility not documented.
+%%
+rc2_40_cbc_encrypt(Key, IVec, Data) when erlang:byte_size(Key) == 5 ->
+    rc2_cbc_crypt(Key,IVec,Data,true).
+
+rc2_40_cbc_decrypt(Key, IVec, Data)  when erlang:byte_size(Key) == 5 ->
+    rc2_cbc_crypt(Key,IVec,Data,false).
 
 %%
 %% DH Diffie-Hellman functions

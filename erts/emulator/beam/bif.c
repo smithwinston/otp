@@ -36,6 +36,7 @@
 #include "beam_bp.h"
 #include "erl_db_util.h"
 #include "register.h"
+#include "erl_thr_progress.h"
 
 static Export* flush_monitor_message_trap = NULL;
 static Export* set_cpu_topology_trap = NULL;
@@ -869,8 +870,6 @@ BIF_RETTYPE spawn_opt_1(BIF_ALIST_1)
 		}
 	    } else if (arg == am_scheduler && is_small(val)) {
 		Sint scheduler = signed_val(val);
-		if (erts_common_run_queue && erts_no_schedulers > 1)
-		    goto error;
 		if (scheduler < 0 || erts_no_schedulers < scheduler)
 		    goto error;
 		so.scheduler = (int) scheduler;
@@ -1107,9 +1106,9 @@ BIF_RETTYPE hibernate_3(BIF_ALIST_3)
 
 /**********************************************************************/
 
-BIF_RETTYPE get_stacktrace_0(Process* p)
+BIF_RETTYPE get_stacktrace_0(BIF_ALIST_0)
 {
-    Eterm t = build_stacktrace(p, p->ftrace);
+    Eterm t = build_stacktrace(BIF_P, BIF_P->ftrace);
     BIF_RET(t);
 }
 
@@ -1119,10 +1118,10 @@ BIF_RETTYPE get_stacktrace_0(Process* p)
  * the process, and the final error value will be {Term,StackTrace}.
  */
 
-BIF_RETTYPE error_1(Process* p, Eterm term)
+BIF_RETTYPE error_1(BIF_ALIST_1)
 {
-    p->fvalue = term;
-    BIF_ERROR(p, EXC_ERROR);
+    BIF_P->fvalue = BIF_ARG_1;
+    BIF_ERROR(BIF_P, EXC_ERROR);
 }
 
 /**********************************************************************/
@@ -1131,12 +1130,12 @@ BIF_RETTYPE error_1(Process* p, Eterm term)
  * in the stacktrace.
  */
 
-BIF_RETTYPE error_2(Process* p, Eterm value, Eterm args)
+BIF_RETTYPE error_2(BIF_ALIST_2)
 {
-    Eterm* hp = HAlloc(p, 3);
+    Eterm* hp = HAlloc(BIF_P, 3);
 
-    p->fvalue = TUPLE2(hp, value, args);
-    BIF_ERROR(p, EXC_ERROR_2);
+    BIF_P->fvalue = TUPLE2(hp, BIF_ARG_1, BIF_ARG_2);
+    BIF_ERROR(BIF_P, EXC_ERROR_2);
 }
 
 /**********************************************************************/
@@ -1146,10 +1145,10 @@ BIF_RETTYPE error_2(Process* p, Eterm value, Eterm args)
  * It is useful in stub functions for NIFs.
  */
 
-BIF_RETTYPE nif_error_1(Process* p, Eterm term)
+BIF_RETTYPE nif_error_1(BIF_ALIST_1)
 {
-    p->fvalue = term;
-    BIF_ERROR(p, EXC_ERROR);
+    BIF_P->fvalue = BIF_ARG_1;
+    BIF_ERROR(BIF_P, EXC_ERROR);
 }
 
 /**********************************************************************/
@@ -1159,12 +1158,12 @@ BIF_RETTYPE nif_error_1(Process* p, Eterm term)
  * It is useful in stub functions for NIFs.
  */
 
-BIF_RETTYPE nif_error_2(Process* p, Eterm value, Eterm args)
+BIF_RETTYPE nif_error_2(BIF_ALIST_2)
 {
-    Eterm* hp = HAlloc(p, 3);
+    Eterm* hp = HAlloc(BIF_P, 3);
 
-    p->fvalue = TUPLE2(hp, value, args);
-    BIF_ERROR(p, EXC_ERROR_2);
+    BIF_P->fvalue = TUPLE2(hp, BIF_ARG_1, BIF_ARG_2);
+    BIF_ERROR(BIF_P, EXC_ERROR_2);
 }
 
 /**********************************************************************/
@@ -1183,8 +1182,12 @@ BIF_RETTYPE exit_1(BIF_ALIST_1)
  * If there is an error in the argument format, 
  * return the atom 'badarg' instead.
  */
-Eterm 
-raise_3(Process *c_p, Eterm class, Eterm value, Eterm stacktrace) {
+BIF_RETTYPE raise_3(BIF_ALIST_3)
+{
+    Process *c_p = BIF_P;
+    Eterm class = BIF_ARG_1;
+    Eterm value = BIF_ARG_2;
+    Eterm stacktrace = BIF_ARG_3;
     Eterm reason;
     Eterm l, *hp, *hp_end, *tp;
     int depth, cnt;
@@ -1530,8 +1533,6 @@ BIF_RETTYPE process_flag_2(BIF_ALIST_2)
        ErtsRunQueue *old;
        ErtsRunQueue *new;
        Sint sched;
-       if (erts_common_run_queue && erts_no_schedulers > 1)
-	   goto error;
        if (!is_small(BIF_ARG_2))
 	   goto error;
        sched = signed_val(BIF_ARG_2);
@@ -1730,10 +1731,10 @@ BIF_RETTYPE whereis_1(BIF_ALIST_1)
  * erlang:'!'/2
  */
 
-Eterm
-ebif_bang_2(Process* p, Eterm To, Eterm Message)
+BIF_RETTYPE
+ebif_bang_2(BIF_ALIST_2)
 {
-    return send_2(p, To, Message);
+    return erl_send(BIF_P, BIF_ARG_1, BIF_ARG_2);
 }
 
 
@@ -2070,8 +2071,13 @@ do_send(Process *p, Eterm to, Eterm msg, int suspend) {
 }
 
 
-Eterm
-send_3(Process *p, Eterm to, Eterm msg, Eterm opts) {
+BIF_RETTYPE send_3(BIF_ALIST_3)
+{
+    Process *p = BIF_P;
+    Eterm to = BIF_ARG_1;
+    Eterm msg = BIF_ARG_2;
+    Eterm opts = BIF_ARG_3;
+
     int connect = !0;
     int suspend = !0;
     Eterm l = opts;
@@ -2135,8 +2141,13 @@ send_3(Process *p, Eterm to, Eterm msg, Eterm opts) {
     BIF_ERROR(p, BADARG);
 }
 
-Eterm
-send_2(Process *p, Eterm to, Eterm msg) {
+BIF_RETTYPE send_2(BIF_ALIST_2)
+{
+    return erl_send(BIF_P, BIF_ARG_1, BIF_ARG_2);
+}
+
+Eterm erl_send(Process *p, Eterm to, Eterm msg)
+{
     Sint result = do_send(p, to, msg, !0);
     
     if (result > 0) {
@@ -3312,8 +3323,11 @@ time_to_parts(Eterm date, Sint* year, Sint* month, Sint* day,
 /* return the universal time */
 
 BIF_RETTYPE 
-localtime_to_universaltime_2(Process *p, Eterm localtime, Eterm dst)
+localtime_to_universaltime_2(BIF_ALIST_2)
 {
+    Process *p = BIF_P;
+    Eterm localtime = BIF_ARG_1;
+    Eterm dst = BIF_ARG_2;
     Sint year, month, day;
     Sint hour, minute, second;
     int isdst;
@@ -3370,6 +3384,61 @@ BIF_RETTYPE universaltime_to_localtime_1(BIF_ALIST_1)
     hp += 4;
     BIF_RET(TUPLE2(hp, res1, res2));
 }
+
+/* convert calendar:universaltime_to_seconds/1 */
+
+BIF_RETTYPE universaltime_to_posixtime_1(BIF_ALIST_1)
+{
+    Sint year, month, day;
+    Sint hour, minute, second;
+
+    Sint64 seconds = 0;
+    Eterm *hp;
+    Uint hsz = 0;
+
+    if (!time_to_parts(BIF_ARG_1, &year, &month, &day, 
+		       &hour, &minute, &second))
+	BIF_ERROR(BIF_P, BADARG);
+
+    if (!univ_to_seconds(year, month, day, hour, minute, second, &seconds)) {
+	BIF_ERROR(BIF_P, BADARG);
+    }
+
+    erts_bld_sint64(NULL, &hsz, seconds);
+    hp = HAlloc(BIF_P, hsz);
+    BIF_RET(erts_bld_sint64(&hp, NULL, seconds));
+}
+
+/* convert calendar:seconds_to_universaltime/1 */
+
+BIF_RETTYPE posixtime_to_universaltime_1(BIF_ALIST_1)
+{
+    Sint year, month, day;
+    Sint hour, minute, second;
+    Eterm res1, res2;
+    Eterm* hp;
+
+    Sint64 time = 0;
+
+    if (!term_to_Sint64(BIF_ARG_1, &time)) {
+	BIF_ERROR(BIF_P, BADARG);
+    }
+
+    if (!seconds_to_univ(time, &year, &month, &day,
+		&hour, &minute, &second)) {
+	BIF_ERROR(BIF_P, BADARG);
+    }
+
+    hp = HAlloc(BIF_P, 4+4+3);
+    res1 = TUPLE3(hp,make_small(year),make_small(month),
+		  make_small(day));
+    hp += 4;
+    res2 = TUPLE3(hp,make_small(hour),make_small(minute),
+		  make_small(second));
+    hp += 4;
+    BIF_RET(TUPLE2(hp, res1, res2));
+}
+
 
 /**********************************************************************/
 
@@ -3562,9 +3631,10 @@ BIF_RETTYPE erts_debug_display_1(BIF_ALIST_1)
 }
 
 
-Eterm
-display_string_1(Process* p, Eterm string)
+BIF_RETTYPE display_string_1(BIF_ALIST_1)
 {
+    Process* p = BIF_P;
+    Eterm string = BIF_ARG_1;
     int len = is_string(string);
     char *str;
 
@@ -3580,8 +3650,7 @@ display_string_1(Process* p, Eterm string)
     BIF_RET(am_true);
 }
 
-Eterm
-display_nl_0(Process* p)
+BIF_RETTYPE display_nl_0(BIF_ALIST_0)
 {
     erts_fprintf(stderr, "\n");
     BIF_RET(am_true);
@@ -3645,8 +3714,13 @@ BIF_RETTYPE function_exported_3(BIF_ALIST_3)
 
 /**********************************************************************/    
 
-BIF_RETTYPE is_builtin_3(Process* p, Eterm Mod, Eterm Name, Eterm Arity)
+BIF_RETTYPE is_builtin_3(BIF_ALIST_3)
 {
+    Process* p = BIF_P;
+    Eterm Mod = BIF_ARG_1;
+    Eterm Name = BIF_ARG_2;
+    Eterm Arity = BIF_ARG_3;
+
     if (is_not_atom(Mod) || is_not_atom(Name) || is_not_small(Arity)) {
 	BIF_ERROR(p, BADARG);
     }
@@ -3711,9 +3785,11 @@ BIF_RETTYPE make_fun_3(BIF_ALIST_3)
     BIF_RET(make_export(hp));
 }
 
-Eterm
-fun_to_list_1(Process* p, Eterm fun)
+BIF_RETTYPE fun_to_list_1(BIF_ALIST_1)
 {
+    Process* p = BIF_P;
+    Eterm fun = BIF_ARG_1;
+
     if (is_not_any_fun(fun))
 	BIF_ERROR(p, BADARG);
     BIF_RET(term2list_dsprintf(p, fun));
@@ -4009,11 +4085,11 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	}
 
 	erts_smp_proc_unlock(BIF_P, ERTS_PROC_LOCK_MAIN);
-	erts_smp_block_system(0);
+	erts_smp_thr_progress_block();
 
 	H_MIN_SIZE = erts_next_heap_size(n, 0);
 
-	erts_smp_release_system();
+	erts_smp_thr_progress_unblock();
 	erts_smp_proc_lock(BIF_P, ERTS_PROC_LOCK_MAIN);
 
 	BIF_RET(make_small(oval));
@@ -4025,11 +4101,11 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	}
 
 	erts_smp_proc_unlock(BIF_P, ERTS_PROC_LOCK_MAIN);
-	erts_smp_block_system(0);
+	erts_smp_thr_progress_block();
 
 	BIN_VH_MIN_SIZE = erts_next_heap_size(n, 0);
 
-	erts_smp_release_system();
+	erts_smp_thr_progress_unblock();
 	erts_smp_proc_lock(BIF_P, ERTS_PROC_LOCK_MAIN);
 
 	BIF_RET(make_small(oval));
@@ -4051,7 +4127,7 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	erts_backtrace_depth = n;
 	BIF_RET(make_small(oval));
     } else if (BIF_ARG_1 == am_trace_control_word) {
-	BIF_RET(db_set_trace_control_word_1(BIF_P, BIF_ARG_2));
+	BIF_RET(db_set_trace_control_word(BIF_P, BIF_ARG_2));
     } else if (BIF_ARG_1 == am_sequential_tracer) {
         Eterm old_value = erts_set_system_seq_tracer(BIF_P,
 						     ERTS_PROC_LOCK_MAIN,
@@ -4063,7 +4139,7 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	Uint i;
 	ErlMessage* mp;
 	erts_smp_proc_unlock(BIF_P, ERTS_PROC_LOCK_MAIN);
-	erts_smp_block_system(0);
+	erts_smp_thr_progress_block();
 
 	for (i = 0; i < erts_max_processes; i++) {
 	    if (process_tab[i] != (Process*) 0) {
@@ -4080,7 +4156,7 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	    }
 	}
 
-	erts_smp_release_system();
+	erts_smp_thr_progress_unblock();
 	erts_smp_proc_lock(BIF_P, ERTS_PROC_LOCK_MAIN);
 
 	BIF_RET(am_true);
@@ -4103,8 +4179,20 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 	if (is_value(res))
 	    BIF_RET(res);
     } else if (ERTS_IS_ATOM_STR("cpu_topology", BIF_ARG_1)) {
+	erts_send_warning_to_logger_str(
+	    BIF_P->group_leader,
+	    "A call to erlang:system_flag(cpu_topology, _) was made.\n"
+	    "The cpu_topology argument is deprecated and scheduled\n"
+	    "for removal in erts-5.10/OTP-R16. For more information\n"
+	    "see the erlang:system_flag/2 documentation.\n");
 	BIF_TRAP1(set_cpu_topology_trap, BIF_P, BIF_ARG_2);
     } else if (ERTS_IS_ATOM_STR("scheduler_bind_type", BIF_ARG_1)) {
+	erts_send_warning_to_logger_str(
+	    BIF_P->group_leader,
+	    "A call to erlang:system_flag(scheduler_bind_type, _) was\n"
+	    "made. The scheduler_bind_type argument is deprecated and\n"
+	    "scheduled for removal in erts-5.10/OTP-R16. For more\n"
+	    "information see the erlang:system_flag/2 documentation.\n");
 	return erts_bind_schedulers(BIF_P, BIF_ARG_2);
     }
     error:
@@ -4291,8 +4379,7 @@ void
 erts_bif_prep_await_proc_exit_data_trap(Process *c_p, Eterm pid, Eterm ret)
 {
     if (skip_current_msgq(c_p)) {
-	Eterm unused;
-	ERTS_BIF_PREP_TRAP3(unused, await_proc_exit_trap, c_p, pid, am_data, ret);
+	ERTS_BIF_PREP_TRAP3_NO_RET(await_proc_exit_trap, c_p, pid, am_data, ret);
     }
 }
 
@@ -4300,8 +4387,7 @@ void
 erts_bif_prep_await_proc_exit_reason_trap(Process *c_p, Eterm pid)
 {
     if (skip_current_msgq(c_p)) {
-	Eterm unused;
-	ERTS_BIF_PREP_TRAP3(unused, await_proc_exit_trap, c_p,
+	ERTS_BIF_PREP_TRAP3_NO_RET(await_proc_exit_trap, c_p,
 			    pid, am_reason, am_undefined);
     }
 }
@@ -4316,7 +4402,6 @@ erts_bif_prep_await_proc_exit_apply_trap(Process *c_p,
 {
     ASSERT(is_atom(module) && is_atom(function));
     if (skip_current_msgq(c_p)) {
-	Eterm unused;
 	Eterm term;
 	Eterm *hp;
 	int i;
@@ -4328,7 +4413,7 @@ erts_bif_prep_await_proc_exit_apply_trap(Process *c_p,
 	    hp += 2;
 	}
 	term = TUPLE3(hp, module, function, term);
-	ERTS_BIF_PREP_TRAP3(unused, await_proc_exit_trap, c_p, pid, am_apply, term);
+	ERTS_BIF_PREP_TRAP3_NO_RET(await_proc_exit_trap, c_p, pid, am_apply, term);
     }
 }
 

@@ -28,9 +28,11 @@
 %% File system and metadata.
 -export([get_cwd/0, get_cwd/1, set_cwd/1, delete/1, rename/2,
 	 make_dir/1, del_dir/1, list_dir/1,
-	 read_file_info/1, write_file_info/2,
+	 read_file_info/1, read_file_info/2,
+	 write_file_info/2, write_file_info/3,
 	 altname/1,
-	 read_link_info/1, read_link/1,
+	 read_link_info/1, read_link_info/2,
+	 read_link/1,
 	 make_link/2, make_symlink/2,
 	 read_file/1, write_file/2, write_file/3]).
 %% Specialized
@@ -50,6 +52,9 @@
 	 change_mode/2, change_time/2, change_time/3]).
 
 -export([pid2name/1]).
+
+%% Sendfile functions
+-export([sendfile/2,sendfile/5]).
 
 %%% Obsolete exported functions
 
@@ -103,6 +108,10 @@
 -type date_time() :: calendar:datetime().
 -type posix_file_advise() :: 'normal' | 'sequential' | 'random'
                            | 'no_reuse' | 'will_need' | 'dont_need'.
+-type sendfile_option() :: {chunk_size, non_neg_integer()}.
+-type file_info_option() :: {'time', 'local'} | {'time', 'universal'} 
+			  | {'time', 'posix'}.
+
 
 %%%-----------------------------------------------------------------
 %%% General functions
@@ -211,6 +220,15 @@ del_dir(Name) ->
 read_file_info(Name) ->
     check_and_call(read_file_info, [file_name(Name)]).
 
+-spec read_file_info(Filename, Opts) -> {ok, FileInfo} | {error, Reason} when
+      Filename :: name(),
+      Opts :: [file_info_option()],
+      FileInfo :: file_info(),
+      Reason :: posix() | badarg.
+
+read_file_info(Name, Opts) when is_list(Opts) ->
+    check_and_call(read_file_info, [file_name(Name), Opts]).
+
 -spec altname(Name :: name()) -> any().
 
 altname(Name) ->
@@ -223,6 +241,16 @@ altname(Name) ->
 
 read_link_info(Name) ->
     check_and_call(read_link_info, [file_name(Name)]).
+
+-spec read_link_info(Name, Opts) -> {ok, FileInfo} | {error, Reason} when
+      Name :: name(),
+      Opts :: [file_info_option()],
+      FileInfo :: file_info(),
+      Reason :: posix() | badarg.
+
+read_link_info(Name, Opts) when is_list(Opts) ->
+    check_and_call(read_link_info, [file_name(Name),Opts]).
+
 
 -spec read_link(Name) -> {ok, Filename} | {error, Reason} when
       Name :: name(),
@@ -239,6 +267,15 @@ read_link(Name) ->
 
 write_file_info(Name, Info = #file_info{}) ->
     check_and_call(write_file_info, [file_name(Name), Info]).
+
+-spec write_file_info(Filename, FileInfo, Opts) -> ok | {error, Reason} when
+      Filename :: name(),
+      Opts :: [file_info_option()],
+      FileInfo :: file_info(),
+      Reason :: posix() | badarg.
+
+write_file_info(Name, Info = #file_info{}, Opts) when is_list(Opts) ->
+    check_and_call(write_file_info, [file_name(Name), Info, Opts]).
 
 -spec list_dir(Dir) -> {ok, Filenames} | {error, Reason} when
       Dir :: name(),
@@ -264,9 +301,9 @@ read_file(Name) ->
 make_link(Old, New) ->
     check_and_call(make_link, [file_name(Old), file_name(New)]).
 
--spec make_symlink(Name1, Name2) -> ok | {error, Reason} when
-      Name1 :: name(),
-      Name2 :: name(),
+-spec make_symlink(Existing, New) -> ok | {error, Reason} when
+      Existing :: name(),
+      New :: name(),
       Reason :: posix() | badarg.
 
 make_symlink(Old, New) ->
@@ -1100,8 +1137,9 @@ change_group(Name, GroupId)
       Mtime :: date_time(),
       Reason :: posix() | badarg.
 
-change_time(Name, Time) 
-  when is_tuple(Time) ->
+change_time(Name, {{Y, M, D}, {H, Min, Sec}}=Time)
+  when is_integer(Y), is_integer(M), is_integer(D),
+       is_integer(H), is_integer(Min), is_integer(Sec)->
     write_file_info(Name, #file_info{mtime=Time}).
 
 -spec change_time(Filename, Atime, Mtime) -> ok | {error, Reason} when
@@ -1110,9 +1148,149 @@ change_time(Name, Time)
       Mtime :: date_time(),
       Reason :: posix() | badarg.
 
-change_time(Name, Atime, Mtime) 
-  when is_tuple(Atime), is_tuple(Mtime) ->
+change_time(Name, {{AY, AM, AD}, {AH, AMin, ASec}}=Atime,
+         {{MY, MM, MD}, {MH, MMin, MSec}}=Mtime)
+  when is_integer(AY), is_integer(AM), is_integer(AD),
+       is_integer(AH), is_integer(AMin), is_integer(ASec),
+       is_integer(MY), is_integer(MM), is_integer(MD),
+       is_integer(MH), is_integer(MMin), is_integer(MSec)->
     write_file_info(Name, #file_info{atime=Atime, mtime=Mtime}).
+
+%%
+%% Send data using sendfile
+%%
+
+-define(MAX_CHUNK_SIZE, (1 bsl 20)*20). %% 20 MB, has to fit in primary memory
+
+-spec sendfile(RawFile, Socket, Offset, Bytes, Opts) ->
+   {'ok', non_neg_integer()} | {'error', inet:posix() | 
+				closed | badarg | not_owner} when
+      RawFile :: file:fd(),
+      Socket :: inet:socket(),
+      Offset :: non_neg_integer(),
+      Bytes :: non_neg_integer(),
+      Opts :: [sendfile_option()].
+sendfile(File, _Sock, _Offet, _Bytes, _Opts) when is_pid(File) ->
+    {error, badarg};
+sendfile(File, Sock, Offset, Bytes, []) ->
+    sendfile(File, Sock, Offset, Bytes, ?MAX_CHUNK_SIZE, [], [],
+	     false, false, false);
+sendfile(File, Sock, Offset, Bytes, Opts) ->
+    ChunkSize0 = proplists:get_value(chunk_size, Opts, ?MAX_CHUNK_SIZE),
+    ChunkSize = if ChunkSize0 > ?MAX_CHUNK_SIZE ->
+			?MAX_CHUNK_SIZE;
+		   true -> ChunkSize0
+		end,
+    %% Support for headers, trailers and options has been removed because the
+    %% Darwin and BSD API for using it does not play nice with
+    %% non-blocking sockets. See unix_efile.c for more info.
+    sendfile(File, Sock, Offset, Bytes, ChunkSize, [], [],
+	     false,false,false).
+
+%% sendfile/2
+-spec sendfile(Filename, Socket) ->
+   {'ok', non_neg_integer()} | {'error', inet:posix() | 
+				closed | badarg | not_owner}
+      when Filename :: file:name(),
+	   Socket :: inet:socket().
+sendfile(Filename, Sock)  ->
+    case file:open(Filename, [read, raw, binary]) of
+	{error, Reason} ->
+	    {error, Reason};
+	{ok, Fd} ->
+	    Res = sendfile(Fd, Sock, 0, 0, []),
+	    file:close(Fd),
+	    Res
+    end.
+
+%% Internal sendfile functions
+sendfile(#file_descriptor{ module = Mod } = Fd, Sock, Offset, Bytes,
+	 ChunkSize, Headers, Trailers, Nodiskio, MNowait, Sync)
+  when is_port(Sock) ->
+    case Mod:sendfile(Fd, Sock, Offset, Bytes, ChunkSize, Headers, Trailers,
+		      Nodiskio, MNowait, Sync) of
+	{error, enotsup} ->
+	    sendfile_fallback(Fd, Sock, Offset, Bytes, ChunkSize,
+			      Headers, Trailers);
+	Else ->
+	    Else
+    end;
+sendfile(_,_,_,_,_,_,_,_,_,_) ->
+    {error, badarg}.
+
+%%%
+%% Sendfile Fallback
+%%%
+sendfile_fallback(File, Sock, Offset, Bytes, ChunkSize,
+		  Headers, Trailers)
+  when Headers == []; is_integer(Headers) ->
+    case sendfile_fallback(File, Sock, Offset, Bytes, ChunkSize) of
+	{ok, BytesSent} when is_list(Trailers),
+			     Trailers =/= [],
+			     is_integer(Headers) ->
+	    sendfile_send(Sock, Trailers, BytesSent+Headers);
+	{ok, BytesSent} when is_list(Trailers), Trailers =/= [] ->
+	    sendfile_send(Sock, Trailers, BytesSent);
+	{ok, BytesSent} when is_integer(Headers) ->
+	    {ok, BytesSent + Headers};
+	Else ->
+	    Else
+    end;
+sendfile_fallback(File, Sock, Offset, Bytes, ChunkSize, Headers, Trailers) ->
+    case sendfile_send(Sock, Headers, 0) of
+	{ok, BytesSent} ->
+	    sendfile_fallback(File, Sock, Offset, Bytes, ChunkSize, BytesSent,
+			      Trailers);
+	Else ->
+	    Else
+    end.
+
+
+sendfile_fallback(File, Sock, Offset, Bytes, ChunkSize) ->
+    {ok, CurrPos} = file:position(File, {cur, 0}),
+    {ok, _NewPos} = file:position(File, {bof, Offset}),
+    Res = sendfile_fallback_int(File, Sock, Bytes, ChunkSize, 0),
+    file:position(File, {bof, CurrPos}),
+    Res.
+
+
+sendfile_fallback_int(File, Sock, Bytes, ChunkSize, BytesSent)
+  when Bytes > BytesSent; Bytes == 0 ->
+    Size = if Bytes == 0 ->
+		   ChunkSize;
+	       (Bytes - BytesSent + ChunkSize) > 0 ->
+		   Bytes - BytesSent;
+	      true ->
+		   ChunkSize
+	   end,
+    case file:read(File, Size) of
+	{ok, Data} ->
+	    case sendfile_send(Sock, Data, BytesSent) of
+		{ok,NewBytesSent} ->
+		    sendfile_fallback_int(
+		      File, Sock, Bytes, ChunkSize,
+		      NewBytesSent);
+		Error ->
+		    Error
+	    end;
+	eof ->
+	    {ok, BytesSent};
+	Error ->
+	    Error
+    end;
+sendfile_fallback_int(_File, _Sock, BytesSent, _ChunkSize, BytesSent) ->
+    {ok, BytesSent}.
+
+sendfile_send(Sock, Data, Old) ->
+    Len = iolist_size(Data),
+    case gen_tcp:send(Sock, Data) of
+	ok ->
+	    {ok, Len+Old};
+	Else ->
+	    Else
+    end.
+
+
 
 %%%-----------------------------------------------------------------
 %%% Helpers

@@ -32,6 +32,7 @@
 #include "error.h"
 #include "big.h"
 #include "beam_bp.h"
+#include "erl_thr_progress.h"
 
 #include <limits.h>
 #include <stddef.h> /* offsetof */
@@ -130,10 +131,13 @@ static void pre_nif_noproc(ErlNifEnv* env, struct erl_module_nif* mod_nif)
     env->tmp_obj_list = NULL;
 }
 
-/* Temporary object header, auto-deallocated when NIF returns. */
+/* Temporary object header, auto-deallocated when NIF returns
+ * or when independent environment is cleared.
+ */
 struct enif_tmp_obj_t {
     struct enif_tmp_obj_t* next;
     void (*dtor)(struct enif_tmp_obj_t*);
+    ErtsAlcType_t allocator;
     /*char data[];*/
 };
 
@@ -244,7 +248,7 @@ ErlNifEnv* enif_alloc_env(void)
     msg_env->env.hp_end = phony_heap;
     msg_env->env.heap_frag = NULL;
     msg_env->env.mod_nif = NULL;
-    msg_env->env.tmp_obj_list = (struct enif_tmp_obj_t*) 1; /* invalid non-NULL */
+    msg_env->env.tmp_obj_list = NULL;
     msg_env->env.proc = &msg_env->phony_proc;
     memset(&msg_env->phony_proc, 0, sizeof(Process));
     HEAP_START(&msg_env->phony_proc) = phony_heap;
@@ -289,6 +293,7 @@ void enif_clear_env(ErlNifEnv* env)
     menv->env.hp = menv->env.hp_end = HEAP_TOP(p);
     
     ASSERT(!is_offheap(&MSO(p)));
+    free_tmp_objs(env);
 }
 int enif_send(ErlNifEnv* env, const ErlNifPid* to_pid,
 	      ErlNifEnv* msg_env, ERL_NIF_TERM msg)
@@ -440,24 +445,31 @@ int enif_is_number(ErlNifEnv* env, ERL_NIF_TERM term)
     return is_number(term);
 }
 
+static ERTS_INLINE int is_proc_bound(ErlNifEnv* env)
+{
+    return env->mod_nif != NULL;
+}
+
 static void aligned_binary_dtor(struct enif_tmp_obj_t* obj)
 {
-    erts_free_aligned_binary_bytes_extra((byte*)obj,ERTS_ALC_T_TMP);
+    erts_free_aligned_binary_bytes_extra((byte*)obj, obj->allocator);
 }
 
 int enif_inspect_binary(ErlNifEnv* env, Eterm bin_term, ErlNifBinary* bin)
 {
+    ErtsAlcType_t allocator = is_proc_bound(env) ? ERTS_ALC_T_TMP : ERTS_ALC_T_NIF;
     union {
 	struct enif_tmp_obj_t* tmp;
 	byte* raw_ptr;
     }u;
     u.tmp = NULL;
-    bin->data = erts_get_aligned_binary_bytes_extra(bin_term, &u.raw_ptr, ERTS_ALC_T_TMP,
+    bin->data = erts_get_aligned_binary_bytes_extra(bin_term, &u.raw_ptr, allocator,
 						    sizeof(struct enif_tmp_obj_t));
     if (bin->data == NULL) {
 	return 0;
     }
     if (u.tmp != NULL) {
+	u.tmp->allocator = allocator;
 	u.tmp->next = env->tmp_obj_list;
 	u.tmp->dtor = &aligned_binary_dtor;
 	env->tmp_obj_list = u.tmp;
@@ -471,12 +483,13 @@ int enif_inspect_binary(ErlNifEnv* env, Eterm bin_term, ErlNifBinary* bin)
 
 static void tmp_alloc_dtor(struct enif_tmp_obj_t* obj)
 {
-    erts_free(ERTS_ALC_T_TMP,  obj);
+    erts_free(obj->allocator,  obj);
 }
 
 int enif_inspect_iolist_as_binary(ErlNifEnv* env, Eterm term, ErlNifBinary* bin)
 {
     struct enif_tmp_obj_t* tobj;
+    ErtsAlcType_t allocator;
     Uint sz;
     if (is_binary(term)) {
 	return enif_inspect_binary(env,term,bin);
@@ -491,8 +504,10 @@ int enif_inspect_iolist_as_binary(ErlNifEnv* env, Eterm term, ErlNifBinary* bin)
     if (erts_iolist_size(term, &sz)) {
 	return 0;
     }
-    
-    tobj = erts_alloc(ERTS_ALC_T_TMP, sz + sizeof(struct enif_tmp_obj_t));
+
+    allocator = is_proc_bound(env) ? ERTS_ALC_T_TMP : ERTS_ALC_T_NIF;
+    tobj = erts_alloc(allocator, sz + sizeof(struct enif_tmp_obj_t));
+    tobj->allocator = allocator;
     tobj->next = env->tmp_obj_list;
     tobj->dtor = &tmp_alloc_dtor;
     env->tmp_obj_list = tobj;
@@ -516,7 +531,7 @@ int enif_alloc_binary(size_t size, ErlNifBinary* bin)
     }
     refbin->flags = BIN_FLAG_DRV; /* BUGBUG: Flag? */
     erts_refc_init(&refbin->refc, 1);
-    refbin->orig_size = (long) size;
+    refbin->orig_size = (SWord) size;
 
     bin->size = size;
     bin->data = (unsigned char*) refbin->orig_bytes;
@@ -681,6 +696,7 @@ Eterm enif_make_sub_binary(ErlNifEnv* env, ERL_NIF_TERM bin_term,
     ErlSubBin* sb;
     Eterm orig;
     Uint offset, bit_offset, bit_size; 
+#ifdef DEBUG
     unsigned src_size;
 
     ASSERT(is_binary(bin_term));
@@ -688,6 +704,7 @@ Eterm enif_make_sub_binary(ErlNifEnv* env, ERL_NIF_TERM bin_term,
     ASSERT(pos <= src_size);
     ASSERT(size <= src_size);
     ASSERT(pos + size <= src_size);   
+#endif
     sb = (ErlSubBin*) alloc_heap(env, ERL_SUB_BIN_SIZE);
     ERTS_GET_REAL_BIN(bin_term, orig, offset, bit_offset, bit_size);
     sb->thing_word = HEADER_SUB_BIN;
@@ -727,7 +744,8 @@ int enif_get_int(ErlNifEnv* env, Eterm term, int* ip)
 {
 #if SIZEOF_INT ==  ERTS_SIZEOF_ETERM
     return term_to_Sint(term, (Sint*)ip);
-#elif SIZEOF_LONG ==  ERTS_SIZEOF_ETERM
+#elif (SIZEOF_LONG ==  ERTS_SIZEOF_ETERM) || \
+  (SIZEOF_LONG_LONG ==  ERTS_SIZEOF_ETERM)
     Sint i;
     if (!term_to_Sint(term, &i) || i < INT_MIN || i > INT_MAX) {
 	return 0;
@@ -743,7 +761,8 @@ int enif_get_uint(ErlNifEnv* env, Eterm term, unsigned* ip)
 {
 #if SIZEOF_INT == ERTS_SIZEOF_ETERM
     return term_to_Uint(term, (Uint*)ip);
-#elif SIZEOF_LONG == ERTS_SIZEOF_ETERM
+#elif (SIZEOF_LONG == ERTS_SIZEOF_ETERM) || \
+  (SIZEOF_LONG_LONG ==  ERTS_SIZEOF_ETERM)
     Uint i;
     if (!term_to_Uint(term, &i) || i > UINT_MAX) {
 	return 0;
@@ -759,6 +778,13 @@ int enif_get_long(ErlNifEnv* env, Eterm term, long* ip)
     return term_to_Sint(term, ip);
 #elif SIZEOF_LONG == 8
     return term_to_Sint64(term, ip);
+#elif SIZEOF_LONG == SIZEOF_INT
+    int tmp,ret;
+    ret = enif_get_int(env,term,&tmp);
+    if (ret) {
+      *ip = (long) tmp;
+    }
+    return ret;
 #else
 #  error Unknown long word size 
 #endif     
@@ -770,6 +796,14 @@ int enif_get_ulong(ErlNifEnv* env, Eterm term, unsigned long* ip)
     return term_to_Uint(term, ip);
 #elif SIZEOF_LONG == 8
     return term_to_Uint64(term, ip);
+#elif SIZEOF_LONG == SIZEOF_INT
+    int ret;
+    unsigned int tmp;
+    ret = enif_get_uint(env,term,&tmp);
+    if (ret) {
+      *ip = (unsigned long) tmp;
+    }
+    return ret;
 #else
 #  error Unknown long word size 
 #endif     
@@ -830,7 +864,8 @@ ERL_NIF_TERM enif_make_int(ErlNifEnv* env, int i)
 {
 #if SIZEOF_INT == ERTS_SIZEOF_ETERM
     return IS_SSMALL(i) ? make_small(i) : small_to_big(i,alloc_heap(env,2));
-#elif SIZEOF_LONG == ERTS_SIZEOF_ETERM
+#elif (SIZEOF_LONG == ERTS_SIZEOF_ETERM) || \
+  (SIZEOF_LONG_LONG == ERTS_SIZEOF_ETERM)
     return make_small(i);
 #endif
 }
@@ -839,7 +874,8 @@ ERL_NIF_TERM enif_make_uint(ErlNifEnv* env, unsigned i)
 {
 #if SIZEOF_INT == ERTS_SIZEOF_ETERM
     return IS_USMALL(0,i) ? make_small(i) : uint_to_big(i,alloc_heap(env,2));
-#elif SIZEOF_LONG == ERTS_SIZEOF_ETERM
+#elif (SIZEOF_LONG ==  ERTS_SIZEOF_ETERM) || \
+  (SIZEOF_LONG_LONG ==  ERTS_SIZEOF_ETERM)
     return make_small(i);
 #endif
 }
@@ -851,6 +887,8 @@ ERL_NIF_TERM enif_make_long(ErlNifEnv* env, long i)
     }
 #if SIZEOF_LONG == ERTS_SIZEOF_ETERM
     return small_to_big(i, alloc_heap(env,2));
+#elif SIZEOF_LONG_LONG ==  ERTS_SIZEOF_ETERM
+    return make_small(i);
 #elif SIZEOF_LONG == 8
     ensure_heap(env,3);
     return erts_sint64_to_big(i, &env->hp);
@@ -864,6 +902,8 @@ ERL_NIF_TERM enif_make_ulong(ErlNifEnv* env, unsigned long i)
     }
 #if SIZEOF_LONG == ERTS_SIZEOF_ETERM
     return uint_to_big(i,alloc_heap(env,2));
+#elif SIZEOF_LONG_LONG ==  ERTS_SIZEOF_ETERM
+    return make_small(i);
 #elif SIZEOF_LONG == 8
     ensure_heap(env,3);
     return erts_uint64_to_big(i, &env->hp);    
@@ -1140,7 +1180,7 @@ static ErlNifResourceType* find_resource_type(Eterm module, Eterm name)
 }
 
 #define in_area(ptr,start,nbytes) \
-    ((unsigned long)((char*)(ptr) - (char*)(start)) < (nbytes))
+    ((UWord)((char*)(ptr) - (char*)(start)) < (nbytes))
 
 
 static void close_lib(struct erl_module_nif* lib)
@@ -1188,7 +1228,7 @@ enif_open_resource_type(ErlNifEnv* env,
     ErlNifResourceFlags op = flags;
     Eterm module_am, name_am;
 
-    ASSERT(erts_smp_is_system_blocked(0));
+    ASSERT(erts_smp_thr_progress_is_blocking());
     ASSERT(module_str == NULL); /* for now... */
     module_am = make_atom(env->mod_nif->mod->module);
     name_am = enif_make_atom(env, name_str);
@@ -1467,6 +1507,7 @@ BIF_RETTYPE load_nif_2(BIF_ALIST_2)
     Eterm ret = am_ok;
     int veto;
     struct erl_module_nif* lib = NULL;
+    int reload_warning = 0;
 
     len = list_length(BIF_ARG_1);
     if (len < 0) {
@@ -1482,7 +1523,7 @@ BIF_RETTYPE load_nif_2(BIF_ALIST_2)
 
     /* Block system (is this the right place to do it?) */
     erts_smp_proc_unlock(BIF_P, ERTS_PROC_LOCK_MAIN);
-    erts_smp_block_system(0);
+    erts_smp_thr_progress_block();
 
     /* Find calling module */
     ASSERT(BIF_P->current != NULL);
@@ -1606,6 +1647,7 @@ BIF_RETTYPE load_nif_2(BIF_ALIST_2)
 	else {
 	    mod->nif->entry = NULL; /* to prevent 'unload' callback */
 	    erts_unload_nif(mod->nif);
+	    reload_warning = 1;
 	}
     }
     else {
@@ -1652,7 +1694,7 @@ BIF_RETTYPE load_nif_2(BIF_ALIST_2)
 	    }
 	    else { /* Function traced, patch the original instruction word */
 		BpData** bps = (BpData**) code_ptr[1];
-		BpData*  bp  = (BpData*) bps[bp_sched2ix()];
+		BpData*  bp  = (BpData*) bps[erts_bp_sched2ix()];
 	        bp->orig_instr = (BeamInstr) BeamOp(op_call_nif);
 	    }	    
 	    code_ptr[5+1] = (BeamInstr) entry->funcs[i].fptr;
@@ -1671,9 +1713,18 @@ BIF_RETTYPE load_nif_2(BIF_ALIST_2)
 	erts_sys_ddll_free_error(&errdesc);
     }
 
-    erts_smp_release_system();
+    erts_smp_thr_progress_unblock();
     erts_smp_proc_lock(BIF_P, ERTS_PROC_LOCK_MAIN);
     erts_free(ERTS_ALC_T_TMP, lib_name);
+
+    if (reload_warning) {
+	erts_dsprintf_buf_t* dsbufp = erts_create_logger_dsbuf();
+	erts_dsprintf(dsbufp,
+		      "Repeated calls to erlang:load_nif from module '%T'.\n\n"
+		      "The NIF reload mechanism is deprecated and must not "
+		      "be used in production systems.\n", mod_atom);
+	erts_send_warning_to_logger(BIF_P->group_leader, dsbufp);
+    }
     BIF_RET(ret);
 }
 
@@ -1683,7 +1734,7 @@ erts_unload_nif(struct erl_module_nif* lib)
 {
     ErlNifResourceType* rt;
     ErlNifResourceType* next;
-    ASSERT(erts_smp_is_system_blocked(0));
+    ASSERT(erts_smp_thr_progress_is_blocking());
     ASSERT(lib != NULL);
     ASSERT(lib->mod != NULL);
     for (rt = resource_type_list.next;
@@ -1743,8 +1794,10 @@ struct readonly_check_t
 };
 static void add_readonly_check(ErlNifEnv* env, unsigned char* ptr, unsigned sz)
 {
-    struct readonly_check_t* obj = erts_alloc(ERTS_ALC_T_TMP, 
+    ErtsAlcType_t allocator = is_proc_bound(env) ? ERTS_ALC_T_TMP : ERTS_ALC_T_NIF;
+    struct readonly_check_t* obj = erts_alloc(allocator, 
 					      sizeof(struct readonly_check_t));
+    obj->hdr.allocator = allocator;
     obj->hdr.next = env->tmp_obj_list;
     env->tmp_obj_list = &obj->hdr;
     obj->hdr.dtor = &readonly_check_dtor;
@@ -1761,7 +1814,7 @@ static void readonly_check_dtor(struct enif_tmp_obj_t* o)
 		" %x != %x\r\nABORTING\r\n", chksum, obj->checksum);
 	abort();
     }
-    erts_free(ERTS_ALC_T_TMP,  obj);
+    erts_free(obj->hdr.allocator,  obj);
 }
 static unsigned calc_checksum(unsigned char* ptr, unsigned size)
 {

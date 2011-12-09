@@ -345,8 +345,13 @@ static int test_double(ErlNifEnv* env, double d1)
 
 #define TAG_BITS        4
 #define SMALL_BITS	(sizeof(void*)*8 - TAG_BITS)
+#ifdef _WIN64
+#define MAX_SMALL	((1LL << (SMALL_BITS-1))-1)
+#define MIN_SMALL	(-(1LL << (SMALL_BITS-1)))
+#else
 #define MAX_SMALL	((1L << (SMALL_BITS-1))-1)
 #define MIN_SMALL	(-(1L << (SMALL_BITS-1)))
+#endif
 
 static ERL_NIF_TERM type_test(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
@@ -1431,6 +1436,26 @@ static ERL_NIF_TERM reverse_list(ErlNifEnv* env, int argc, const ERL_NIF_TERM ar
     return rev_list;
 }
 
+static ERL_NIF_TERM otp_9668_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    /* Inspect in process independent env */
+    ErlNifEnv* myenv = enif_alloc_env();
+    ERL_NIF_TERM mycopy = enif_make_copy(myenv, argv[0]);
+    ErlNifBinary obin, cbin;
+
+    if ((enif_inspect_binary(env, argv[0], &obin)
+	 && enif_inspect_binary(myenv, mycopy, &cbin))
+	||
+	(enif_inspect_iolist_as_binary(env, argv[0], &obin)
+	 && enif_inspect_iolist_as_binary(myenv, mycopy, &cbin)))
+    {
+	assert(obin.size == cbin.size);
+	assert(memcmp(obin.data, cbin.data, obin.size) == 0);
+    }	
+    enif_free_env(myenv);
+    return atom_ok;
+}
+
 static ErlNifFunc nif_funcs[] =
 {
     {"lib_version", 0, lib_version},
@@ -1478,7 +1503,8 @@ static ErlNifFunc nif_funcs[] =
     {"send_term", 2, send_term},
     {"reverse_list",1, reverse_list},
     {"echo_int", 1, echo_int},
-    {"type_sizes", 0, type_sizes}
+    {"type_sizes", 0, type_sizes},
+    {"otp_9668_nif", 1, otp_9668_nif}
 };
 
 ERL_NIF_INIT(nif_SUITE,nif_funcs,load,reload,upgrade,unload)

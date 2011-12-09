@@ -24,6 +24,7 @@ MODULES = \
 	diameter_ct \
 	diameter_util \
 	diameter_enum \
+	diameter_compiler_SUITE \
 	diameter_codec_SUITE \
 	diameter_codec_test \
 	diameter_app_SUITE \
@@ -33,6 +34,7 @@ MODULES = \
 	diameter_stats_SUITE \
 	diameter_watchdog_SUITE \
 	diameter_transport_SUITE \
+	diameter_capx_SUITE \
 	diameter_traffic_SUITE \
 	diameter_relay_SUITE \
 	diameter_tls_SUITE \

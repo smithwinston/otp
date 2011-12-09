@@ -65,6 +65,10 @@ static Export binary_copy_trap_export;
 static BIF_RETTYPE binary_copy_trap(BIF_ALIST_2);
 static Uint max_loop_limit;
 
+static BIF_RETTYPE
+binary_match(Process *p, Eterm arg1, Eterm arg2, Eterm arg3);
+static BIF_RETTYPE
+binary_matches(Process *p, Eterm arg1, Eterm arg2, Eterm arg3);
 
 void erts_init_bif_binary(void)
 {
@@ -1148,7 +1152,7 @@ static int do_binary_match(Process *p, Eterm subject, Uint hsstart, Uint hsend,
 	    erts_free_aligned_binary_bytes(temp_alloc);
 	    return DO_BIN_MATCH_RESTART;
 	} else {
-	    Eterm epos = erts_make_integer(pos+hsstart,p);
+	    Eterm epos = erts_make_integer(pos,p);
 	    Eterm erlen = erts_make_integer(rlen,p);
 	    hp = HAlloc(p,3);
 	    ret = TUPLE2(hp, epos, erlen);
@@ -1399,6 +1403,12 @@ static BIF_RETTYPE binary_matches_trap(BIF_ALIST_3)
 
 BIF_RETTYPE binary_match_3(BIF_ALIST_3)
 {
+    return binary_match(BIF_P, BIF_ARG_1, BIF_ARG_2, BIF_ARG_3);
+}
+
+static BIF_RETTYPE
+binary_match(Process *p, Eterm arg1, Eterm arg2, Eterm arg3)
+{
     Uint hsstart;
     Uint hsend;
     Eterm *tp;
@@ -1408,17 +1418,17 @@ BIF_RETTYPE binary_match_3(BIF_ALIST_3)
     int runres;
     Eterm result;
 
-    if (is_not_binary(BIF_ARG_1)) {
+    if (is_not_binary(arg1)) {
 	goto badarg;
     }
-    if (parse_match_opts_list(BIF_ARG_3,BIF_ARG_1,&hsstart,&hsend)) {
+    if (parse_match_opts_list(arg3,arg1,&hsstart,&hsend)) {
 	goto badarg;
     }
     if (hsend == 0) {
 	BIF_RET(am_nomatch);
     }
-    if (is_tuple(BIF_ARG_2)) {
-	tp = tuple_val(BIF_ARG_2);
+    if (is_tuple(arg2)) {
+	tp = tuple_val(arg2);
 	if (arityval(*tp) != 2 || is_not_atom(tp[1])) {
 	    goto badarg;
 	}
@@ -1437,13 +1447,13 @@ BIF_RETTYPE binary_match_3(BIF_ALIST_3)
 	    goto badarg;
 	}
 	bin_term = tp[2];
-    } else if (do_binary_match_compile(BIF_ARG_2,&type,&bin)) {
+    } else if (do_binary_match_compile(arg2,&type,&bin)) {
 	goto badarg;
     }
-    runres = do_binary_match(BIF_P,BIF_ARG_1,hsstart,hsend,type,bin,NIL,&result);
+    runres = do_binary_match(p,arg1,hsstart,hsend,type,bin,NIL,&result);
     if (runres == DO_BIN_MATCH_RESTART && bin_term == NIL) {
-	Eterm *hp = HAlloc(BIF_P, PROC_BIN_SIZE);
-	bin_term = erts_mk_magic_binary_term(&hp, &MSO(BIF_P), bin);
+	Eterm *hp = HAlloc(p, PROC_BIN_SIZE);
+	bin_term = erts_mk_magic_binary_term(&hp, &MSO(p), bin);
     } else if (bin_term == NIL) {
 	erts_bin_free(bin);
     }
@@ -1451,16 +1461,22 @@ BIF_RETTYPE binary_match_3(BIF_ALIST_3)
     case DO_BIN_MATCH_OK:
 	BIF_RET(result);
     case DO_BIN_MATCH_RESTART:
-	BUMP_ALL_REDS(BIF_P);
-	BIF_TRAP3(&binary_match_trap_export, BIF_P, BIF_ARG_1, result, bin_term);
+	BUMP_ALL_REDS(p);
+	BIF_TRAP3(&binary_match_trap_export, p, arg1, result, bin_term);
     default:
 	goto badarg;
     }
  badarg:
-    BIF_ERROR(BIF_P,BADARG);
+    BIF_ERROR(p,BADARG);
 }
 
 BIF_RETTYPE binary_matches_3(BIF_ALIST_3)
+{
+    return binary_matches(BIF_P, BIF_ARG_1, BIF_ARG_2, BIF_ARG_3);
+}
+
+static BIF_RETTYPE
+binary_matches(Process *p, Eterm arg1, Eterm arg2, Eterm arg3)
 {
     Uint hsstart, hsend;
     Eterm *tp;
@@ -1470,17 +1486,17 @@ BIF_RETTYPE binary_matches_3(BIF_ALIST_3)
     int runres;
     Eterm result;
 
-    if (is_not_binary(BIF_ARG_1)) {
+    if (is_not_binary(arg1)) {
 	goto badarg;
     }
-    if (parse_match_opts_list(BIF_ARG_3,BIF_ARG_1,&hsstart,&hsend)) {
+    if (parse_match_opts_list(arg3,arg1,&hsstart,&hsend)) {
 	goto badarg;
     }
     if (hsend == 0) {
 	BIF_RET(NIL);
     }
-    if (is_tuple(BIF_ARG_2)) {
-	tp = tuple_val(BIF_ARG_2);
+    if (is_tuple(arg2)) {
+	tp = tuple_val(arg2);
 	if (arityval(*tp) != 2 || is_not_atom(tp[1])) {
 	    goto badarg;
 	}
@@ -1499,14 +1515,14 @@ BIF_RETTYPE binary_matches_3(BIF_ALIST_3)
 	    goto badarg;
 	}
 	bin_term = tp[2];
-    } else if (do_binary_match_compile(BIF_ARG_2,&type,&bin)) {
+    } else if (do_binary_match_compile(arg2,&type,&bin)) {
 	goto badarg;
     }
-    runres = do_binary_matches(BIF_P,BIF_ARG_1,hsstart,hsend,type,bin,
+    runres = do_binary_matches(p,arg1,hsstart,hsend,type,bin,
 			       NIL,&result);
     if (runres == DO_BIN_MATCH_RESTART && bin_term == NIL) {
-	Eterm *hp = HAlloc(BIF_P, PROC_BIN_SIZE);
-	bin_term = erts_mk_magic_binary_term(&hp, &MSO(BIF_P), bin);
+	Eterm *hp = HAlloc(p, PROC_BIN_SIZE);
+	bin_term = erts_mk_magic_binary_term(&hp, &MSO(p), bin);
     } else if (bin_term == NIL) {
 	erts_bin_free(bin);
     }
@@ -1514,26 +1530,26 @@ BIF_RETTYPE binary_matches_3(BIF_ALIST_3)
     case DO_BIN_MATCH_OK:
 	BIF_RET(result);
     case DO_BIN_MATCH_RESTART:
-	BUMP_ALL_REDS(BIF_P);
-	BIF_TRAP3(&binary_matches_trap_export, BIF_P, BIF_ARG_1, result,
+	BUMP_ALL_REDS(p);
+	BIF_TRAP3(&binary_matches_trap_export, p, arg1, result,
 		  bin_term);
     default:
 	goto badarg;
     }
  badarg:
-    BIF_ERROR(BIF_P,BADARG);
+    BIF_ERROR(p,BADARG);
 }
 
 
 BIF_RETTYPE binary_match_2(BIF_ALIST_2)
 {
-    return binary_match_3(BIF_P,BIF_ARG_1,BIF_ARG_2,((Eterm) 0));
+    return binary_match(BIF_P,BIF_ARG_1,BIF_ARG_2,((Eterm) 0));
 }
 
 
 BIF_RETTYPE binary_matches_2(BIF_ALIST_2)
 {
-    return binary_matches_3(BIF_P,BIF_ARG_1,BIF_ARG_2,((Eterm) 0));
+    return binary_matches(BIF_P,BIF_ARG_1,BIF_ARG_2,((Eterm) 0));
 }
 
 
@@ -1882,9 +1898,9 @@ static BIF_RETTYPE do_longest_common(Process *p, Eterm list, int direction)
     cd = (CommonData *) ERTS_MAGIC_BIN_DATA(mb);
     l = list;
     while (is_list(l)) {
-	Uint bitoffs;
+	ERTS_DECLARE_DUMMY(Uint bitoffs);
 	Uint bitsize;
-	Uint offset;
+	ERTS_DECLARE_DUMMY(Uint offset);
 	Eterm real_bin;
 	ProcBin* pb;
 
@@ -2361,7 +2377,7 @@ static BIF_RETTYPE do_binary_copy(Process *p, Eterm bin, Eterm en)
 {
     Uint n;
     byte *bytes;
-    Uint bit_offs;
+    ERTS_DECLARE_DUMMY(Uint bit_offs);
     Uint bit_size;
     size_t size;
     Uint reds = get_reds(p, BINARY_COPY_LOOP_FACTOR);
@@ -2390,9 +2406,9 @@ static BIF_RETTYPE do_binary_copy(Process *p, Eterm bin, Eterm en)
 
     if ((target_size - size) >= reds) {
 	Eterm orig;
-	Uint offset;
-	Uint bit_offset;
-	Uint bit_size;
+	ERTS_DECLARE_DUMMY(Uint offset);
+	ERTS_DECLARE_DUMMY(Uint bit_offset);
+	ERTS_DECLARE_DUMMY(Uint bit_size);
 	CopyBinState *cbs;
 	Eterm *hp;
 	Eterm trap_term;

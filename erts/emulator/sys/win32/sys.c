@@ -216,6 +216,9 @@ void sys_tty_reset(int exit_code)
 void erl_sys_args(int* argc, char** argv)
 {
     char *event_name;
+
+    erts_sys_env_init();
+
     nohup = get_and_remove_option(argc, argv, "-nohup");
 
 #ifdef DEBUG
@@ -565,51 +568,6 @@ struct erl_drv_entry vanilla_driver_entry = {
     NULL, /* process_exit */
     stop_select
 };
-
-#if defined(USE_THREADS) && !defined(ERTS_SMP)
-
-static int  async_drv_init(void);
-static ErlDrvData async_drv_start(ErlDrvPort, char*, SysDriverOpts*);
-static void async_drv_stop(ErlDrvData);
-static void async_drv_input(ErlDrvData, ErlDrvEvent);
-
-/* INTERNAL use only */
-
-void null_output(ErlDrvData drv_data, char* buf, int len)
-{
-}
-
-void null_ready_output(ErlDrvData drv_data, ErlDrvEvent event)
-{
-}
-
-struct erl_drv_entry async_driver_entry = {
-    async_drv_init,
-    async_drv_start,
-    async_drv_stop,
-    null_output,
-    async_drv_input,
-    null_ready_output,
-    "async",
-    NULL, /* finish */
-    NULL, /* handle */
-    NULL, /* control */
-    NULL, /* timeout */
-    NULL, /* outputv */
-    NULL, /* ready_async */
-    NULL, /* flush */
-    NULL, /* call */
-    NULL, /* event */
-    ERL_DRV_EXTENDED_MARKER,
-    ERL_DRV_EXTENDED_MAJOR_VERSION,
-    ERL_DRV_EXTENDED_MINOR_VERSION,
-    0,	/* ERL_DRV_FLAGs */
-    NULL,
-    NULL, /* process_exit */
-    stop_select
-};
-
-#endif
 
 /*
  * Initialises a DriverData structure.
@@ -1675,17 +1633,6 @@ create_child_process
     if (applType == APPL_DOS) {
 	WaitForSingleObject(hProcess, 50);
     }
-    
-    /* 
-     * When an application spawns a process repeatedly, a new thread 
-     * instance will be created for each process but the previous 
-     * instances may not be cleaned up.  This results in a significant 
-     * virtual memory loss each time the process is spawned.  If there 
-     * is a WaitForInputIdle() call between CreateProcess() and
-     * CloseHandle(), the problem does not occur. PSS ID Number: Q124121
-     */
-    
-    WaitForInputIdle(piProcInfo.hProcess, 5000);
     
     return ok;
 }
@@ -2825,30 +2772,6 @@ sys_init_io(void)
        We estimate the number to twice the amount of ports. 
        We really dont know on windows, do we? */
     max_files = 2*erts_max_ports;
-    
-#ifdef USE_THREADS
-#ifdef ERTS_SMP
-    if (init_async(-1) < 0)
-	erl_exit(1, "Failed to initialize async-threads\n");
-#else
-    {
-	/* This is special stuff, starting a driver from the 
-	 * system routines, but is a nice way of handling stuff
-	 * the erlang way
-	 */
-	SysDriverOpts dopts;
-	int ret;
-
-	sys_memset((void*)&dopts, 0, sizeof(SysDriverOpts));
-	add_driver_entry(&async_driver_entry);
-	ret = erts_open_driver(NULL, NIL, "async", &dopts, NULL);
-	DEBUGF(("open_driver = %d\n", ret));
-	if (ret < 0)
-	    erl_exit(1, "Failed to open async driver\n");
-	erts_port[ret].status |= ERTS_PORT_SFLG_IMMORTAL;
-    }
-#endif
-#endif
 }
 
 #ifdef ERTS_SMP
@@ -3283,7 +3206,6 @@ erts_sys_pre_init(void)
     }
 #endif
     erts_smp_atomic_init_nob(&sys_misc_mem_sz, 0);
-    erts_sys_env_init();
 }
 
 void noinherit_std_handle(DWORD type)
@@ -3360,15 +3282,15 @@ void erl_sys_init(void)
 		 SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX); 
 }
 
-#ifdef ERTS_SMP
 void
 erts_sys_schedule_interrupt(int set)
 {
     erts_check_io_interrupt(set);
 }
 
+#ifdef ERTS_SMP
 void
-erts_sys_schedule_interrupt_timed(int set, long msec)
+erts_sys_schedule_interrupt_timed(int set, erts_short_time_t msec)
 {
     erts_check_io_interrupt_timed(set, msec);
 }
@@ -3382,76 +3304,7 @@ erts_sys_schedule_interrupt_timed(int set, long msec)
 void
 erl_sys_schedule(int runnable)
 {
-#ifdef ERTS_SMP
     erts_check_io(!runnable);
-    ERTS_SMP_LC_ASSERT(!ERTS_LC_IS_BLOCKING);
-#else
-    erts_check_io_interrupt(0);
-    if (runnable) {
-	erts_check_io(0);	/* Poll for I/O */
-	check_async_ready();	/* Check async completions */
-    } else {
-	erts_check_io(check_async_ready() ? 0 : 1);
-    }
-#endif
+    ERTS_SMP_LC_ASSERT(!erts_thr_progress_is_blocking());
 }
-
-#if defined(USE_THREADS) && !defined(ERTS_SMP)
-/*
- * Async operation support.
- */
-
-static ErlDrvEvent async_drv_event;
-
-void
-sys_async_ready(int fd)
-{
-    SetEvent((HANDLE)async_drv_event);
-}
-
-static int
-async_drv_init(void)
-{
-    async_drv_event = (ErlDrvEvent) NULL;
-    return 0;
-}
-
-static ErlDrvData
-async_drv_start(ErlDrvPort port_num, char* name, SysDriverOpts* opts)
-{
-    if (async_drv_event != (ErlDrvEvent) NULL) {
-	return ERL_DRV_ERROR_GENERAL;
-    }
-    if ((async_drv_event = (ErlDrvEvent)CreateAutoEvent(FALSE)) == (ErlDrvEvent) NULL) {
-	return ERL_DRV_ERROR_GENERAL;
-    }
-
-    driver_select(port_num, async_drv_event, ERL_DRV_READ|ERL_DRV_USE, 1);
-    if (init_async(async_drv_event) < 0) {
-	return ERL_DRV_ERROR_GENERAL;
-    }
-    return (ErlDrvData)port_num;
-}
-
-static void
-async_drv_stop(ErlDrvData port_num)
-{
-    exit_async();
-    driver_select((ErlDrvPort)port_num, async_drv_event, ERL_DRV_READ|ERL_DRV_USE, 0);
-    /*CloseHandle((HANDLE)async_drv_event);*/
-    async_drv_event = (ErlDrvEvent) NULL;
-}
-
-
-static void
-async_drv_input(ErlDrvData port_num, ErlDrvEvent e) 
-{
-    check_async_ready();
-
-    /*
-     * Our event is auto-resetting.
-     */
-}
-
-#endif
 

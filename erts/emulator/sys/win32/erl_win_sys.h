@@ -117,9 +117,30 @@ int erts_check_io_debug(void);
 #define SYS_CLK_TCK 1000
 #define SYS_CLOCK_RESOLUTION 1
 
+#if SIZEOF_TIME_T != 8
+#  error "Unexpected sizeof(time_t)"
+#endif
+
+/*
+ * gcc uses a 4 byte time_t and vc++ uses an 8 byte time_t.
+ * Types seen in beam_emu.c *need* to have the same size
+ * as in the rest of the system...
+ */
+typedef __int64 erts_time_t;
+
+struct tm *sys_localtime_r(time_t *epochs, struct tm *ptm);
+struct tm *sys_gmtime_r(time_t *epochs, struct tm *ptm);
+time_t sys_mktime( struct tm *ptm);
+
+#define localtime_r sys_localtime_r
+#define HAVE_LOCALTIME_R 1
+#define gmtime_r sys_gmtime_r
+#define HAVE_GMTIME_R
+#define mktime sys_mktime
+
 typedef struct {
-    long tv_sec;
-    long tv_usec;
+    erts_time_t tv_sec;
+    erts_time_t tv_usec;
 } SysTimeval;
 
 typedef struct {
@@ -169,9 +190,11 @@ void erts_sys_env_init(void);
 extern volatile int erl_fp_exception;
 
 #include <float.h>
-#if defined (__GNUC__)
+/* I suspect this test isn't right, it might depend on the version of GCC
+   rather than if it's a MINGW gcc, but I havent been able to pinpoint the
+   exact point where _finite was added to the headers in cygwin... */
+#if defined (__GNUC__) && !defined(__MINGW32__)
 int _finite(double x);
-#endif
 #endif
 
 /*#define NO_FPE_SIGNALS*/
@@ -191,13 +214,6 @@ int _finite(double x);
 #define erts_sys_block_fpe() 0
 #define erts_sys_unblock_fpe(x) do{}while(0)
 
-#define SIZEOF_SHORT   2
-#define SIZEOF_INT     4
-#define SIZEOF_LONG    4
-#define SIZEOF_VOID_P  4
-#define SIZEOF_SIZE_T  4
-#define SIZEOF_OFF_T   4
-
 /*
  * Seems to be missing.
  */
@@ -209,4 +225,5 @@ typedef long ssize_t;
 #ifdef USE_THREADS
 int init_async(int);
 int exit_async(void);
+#endif
 #endif

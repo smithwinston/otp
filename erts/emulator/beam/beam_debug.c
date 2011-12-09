@@ -37,6 +37,7 @@
 #include "beam_load.h"
 #include "beam_bp.h"
 #include "erl_binary.h"
+#include "erl_thr_progress.h"
 
 #ifdef ARCH_64
 # define HEXF "%016bpX"
@@ -49,15 +50,18 @@ void dbg_bt(Process* p, Eterm* sp);
 void dbg_where(BeamInstr* addr, Eterm x0, Eterm* reg);
 
 static int print_op(int to, void *to_arg, int op, int size, BeamInstr* addr);
-Eterm
-erts_debug_same_2(Process* p, Eterm term1, Eterm term2)
+
+BIF_RETTYPE
+erts_debug_same_2(BIF_ALIST_2)
 {
-    return (term1 == term2) ? am_true : am_false;
+    return (BIF_ARG_1 == BIF_ARG_2) ? am_true : am_false;
 }
 
-Eterm
-erts_debug_flat_size_1(Process* p, Eterm term)
+BIF_RETTYPE
+erts_debug_flat_size_1(BIF_ALIST_1)
 {
+    Process* p = BIF_P;
+    Eterm term = BIF_ARG_1;
     Uint size = size_object(term);
 
     if (IS_USMALL(0, size)) {
@@ -68,9 +72,13 @@ erts_debug_flat_size_1(Process* p, Eterm term)
     }
 }
 
-Eterm
-erts_debug_breakpoint_2(Process* p, Eterm MFA, Eterm bool)
+
+BIF_RETTYPE
+erts_debug_breakpoint_2(BIF_ALIST_2)
 {
+    Process* p = BIF_P;
+    Eterm MFA = BIF_ARG_1;
+    Eterm bool = BIF_ARG_2;
     Eterm* tp;
     Eterm mfa[3];
     int i;
@@ -107,7 +115,7 @@ erts_debug_breakpoint_2(Process* p, Eterm MFA, Eterm bool)
     }
 
     erts_smp_proc_unlock(p, ERTS_PROC_LOCK_MAIN);
-    erts_smp_block_system(0);
+    erts_smp_thr_progress_block();
 
     if (bool == am_true) {
 	res = make_small(erts_set_debug_break(mfa, specified));
@@ -115,7 +123,7 @@ erts_debug_breakpoint_2(Process* p, Eterm MFA, Eterm bool)
 	res = make_small(erts_clear_debug_break(mfa, specified));
     }
 
-    erts_smp_release_system();
+    erts_smp_thr_progress_unblock();
     erts_smp_proc_lock(p, ERTS_PROC_LOCK_MAIN);
 
     return res;
@@ -175,9 +183,11 @@ erts_debug_instructions_0(BIF_ALIST_0)
     return res;
 }
 
-Eterm
-erts_debug_disassemble_1(Process* p, Eterm addr)
+BIF_RETTYPE
+erts_debug_disassemble_1(BIF_ALIST_1)
 {
+    Process* p = BIF_P;
+    Eterm addr = BIF_ARG_1;
     erts_dsprintf_buf_t *dsbufp;
     Eterm* hp;
     Eterm* tp;

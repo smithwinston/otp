@@ -103,6 +103,15 @@ typedef ERTS_SYS_FD_TYPE ErtsSysFdType;
 #  define ERTS_LIKELY(BOOL)   (BOOL)
 #  define ERTS_UNLIKELY(BOOL) (BOOL)
 #endif
+#ifdef __GNUC__
+#  if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ > 5)
+#    define ERTS_DECLARE_DUMMY(X) X __attribute__ ((unused))
+#  else
+#    define ERTS_DECLARE_DUMMY(X) X
+#  endif
+#else
+#  define ERTS_DECLARE_DUMMY(X) X
+#endif
 
 #if defined(DEBUG) || defined(ERTS_ENABLE_LOCK_CHECK)
 #  undef ERTS_CAN_INLINE
@@ -212,7 +221,8 @@ int real_printf(const char *fmt, ...);
 */
 
 #if !((SIZEOF_VOID_P >= 4) && (SIZEOF_VOID_P == SIZEOF_SIZE_T) \
-      && ((SIZEOF_VOID_P == SIZEOF_INT) || (SIZEOF_VOID_P == SIZEOF_LONG)))
+      && ((SIZEOF_VOID_P == SIZEOF_INT) || (SIZEOF_VOID_P == SIZEOF_LONG) || \
+          (SIZEOF_VOID_P == SIZEOF_LONG_LONG)))
 #error Cannot handle this combination of int/long/void*/size_t sizes
 #endif
 
@@ -253,9 +263,18 @@ typedef int          Sint;
 #if SIZEOF_VOID_P == SIZEOF_LONG
 typedef unsigned long UWord;
 typedef long          SWord;
+#define SWORD_CONSTANT(Const) Const##L
+#define UWORD_CONSTANT(Const) Const##UL
 #elif SIZEOF_VOID_P == SIZEOF_INT
 typedef unsigned int UWord;
 typedef int          SWord;
+#define SWORD_CONSTANT(Const) Const
+#define UWORD_CONSTANT(Const) Const##U
+#elif SIZEOF_VOID_P == SIZEOF_LONG_LONG
+typedef unsigned long long UWord;
+typedef long long          SWord;
+#define SWORD_CONSTANT(Const) Const##LL
+#define UWORD_CONSTANT(Const) Const##ULL
 #else
 #error Found no appropriate type to use for 'Eterm', 'Uint' and 'Sint'
 #endif
@@ -266,12 +285,23 @@ typedef int          SWord;
 typedef unsigned long Eterm;
 typedef unsigned long Uint;
 typedef long          Sint;
+#define SWORD_CONSTANT(Const) Const##L
+#define UWORD_CONSTANT(Const) Const##UL
 #define ERTS_SIZEOF_ETERM SIZEOF_LONG
 #elif SIZEOF_VOID_P == SIZEOF_INT
 typedef unsigned int Eterm;
 typedef unsigned int Uint;
 typedef int          Sint;
+#define SWORD_CONSTANT(Const) Const
+#define UWORD_CONSTANT(Const) Const##U
 #define ERTS_SIZEOF_ETERM SIZEOF_INT
+#elif SIZEOF_VOID_P == SIZEOF_LONG_LONG
+typedef unsigned long long Eterm;
+typedef unsigned long long Uint;
+typedef long long          Sint;
+#define SWORD_CONSTANT(Const) Const##LL
+#define UWORD_CONSTANT(Const) Const##ULL
+#define ERTS_SIZEOF_ETERM SIZEOF_LONG_LONG
 #else
 #error Found no appropriate type to use for 'Eterm', 'Uint' and 'Sint'
 #endif
@@ -475,15 +505,6 @@ __decl_noreturn void __noreturn erl_exit(int n, char*, ...);
 #define ERTS_ABORT_EXIT	(INT_MIN + 1)	/* no crash dump; only abort() */
 #define ERTS_DUMP_EXIT	(127)		/* crash dump; then exit() */
 
-
-#ifndef ERTS_SMP
-int check_async_ready(void);
-#ifdef USE_THREADS
-void sys_async_ready(int hndl);
-int erts_register_async_ready_callback(void (*funcp)(void));
-#endif
-#endif
-
 Eterm erts_check_io_info(void *p);
 
 /* Size of misc memory allocated from system dependent code */
@@ -615,14 +636,12 @@ extern char *erts_sys_ddll_error(int code);
 /*
  * System interfaces for startup.
  */
+#include "erl_time.h"
 
-
-#ifdef ERTS_SMP
 void erts_sys_schedule_interrupt(int set);
-void erts_sys_schedule_interrupt_timed(int set, long msec);
+#ifdef ERTS_SMP
+void erts_sys_schedule_interrupt_timed(int set, erts_short_time_t msec);
 void erts_sys_main_thread(void);
-#else
-#define erts_sys_schedule_interrupt(Set)
 #endif
 
 extern void erts_sys_prepare_crash_dump(void);
@@ -638,17 +657,24 @@ Preload* sys_preloaded(void);
 unsigned char* sys_preload_begin(Preload*);
 void sys_preload_end(Preload*);
 int sys_get_key(int);
-void elapsed_time_both(unsigned long *ms_user, unsigned long *ms_sys, 
-		       unsigned long *ms_user_diff, unsigned long *ms_sys_diff);
-void wall_clock_elapsed_time_both(unsigned long *ms_total, 
-				  unsigned long *ms_diff);
+void elapsed_time_both(UWord *ms_user, UWord *ms_sys, 
+		       UWord *ms_user_diff, UWord *ms_sys_diff);
+void wall_clock_elapsed_time_both(UWord *ms_total, 
+				  UWord *ms_diff);
 void get_time(int *hour, int *minute, int *second);
 void get_date(int *year, int *month, int *day);
 void get_localtime(int *year, int *month, int *day, 
 		   int *hour, int *minute, int *second);
 void get_universaltime(int *year, int *month, int *day, 
 		       int *hour, int *minute, int *second);
-int univ_to_local(Sint *year, Sint *month, Sint *day, 
+int seconds_to_univ(Sint64 seconds, 
+		    Sint *year, Sint *month, Sint *day, 
+		    Sint *hour, Sint *minute, Sint *second);
+int univ_to_seconds(Sint year, Sint month, Sint day, 
+		    Sint hour, Sint minute, Sint second,
+		    Sint64* seconds);
+int univ_to_local(
+    Sint *year, Sint *month, Sint *day, 
 		  Sint *hour, Sint *minute, Sint *second);
 int local_to_univ(Sint *year, Sint *month, Sint *day, 
 		  Sint *hour, Sint *minute, Sint *second, int isdst);
@@ -674,6 +700,8 @@ int erts_sys_putenv(char *key_value, int sep_ix);
    *size), a value > 0 if value buffer is too small (*size is set to needed
    size), and a value < 0 on failure. */
 int erts_sys_getenv(char *key, char *value, size_t *size);
+/* erts_sys_getenv__() is only allowed to be used in early init phase */
+int erts_sys_getenv__(char *key, char *value, size_t *size);
 
 /* Easier to use, but not as efficient, environment functions */
 char *erts_read_env(char *key);
@@ -697,290 +725,13 @@ int erts_write_env(char *key, char *value);
 int sys_alloc_opt(int, int);
 
 typedef struct {
-  Sint trim_threshold;
-  Sint top_pad;
-  Sint mmap_threshold;
-  Sint mmap_max;
+  int trim_threshold;
+  int top_pad;
+  int mmap_threshold;
+  int mmap_max;
 } SysAllocStat;
 
 void sys_alloc_stat(SysAllocStat *);
-
-/* Block the whole system... */
-
-#define ERTS_BS_FLG_ALLOW_GC				(((Uint32) 1) << 0)
-#define ERTS_BS_FLG_ALLOW_IO				(((Uint32) 1) << 1)
-
-/* Activities... */
-typedef enum {
-    ERTS_ACTIVITY_UNDEFINED,	/* Undefined activity */
-    ERTS_ACTIVITY_WAIT,		/* Waiting */
-    ERTS_ACTIVITY_GC,		/* Garbage collecting */
-    ERTS_ACTIVITY_IO		/* I/O including message passing to erl procs */
-} erts_activity_t;
-
-#ifdef ERTS_SMP
-
-typedef enum {
-    ERTS_ACT_ERR_LEAVE_WAIT_UNLOCKED,
-    ERTS_ACT_ERR_LEAVE_UNKNOWN_ACTIVITY,
-    ERTS_ACT_ERR_ENTER_UNKNOWN_ACTIVITY
-} erts_activity_error_t;
-
-typedef struct {
-    erts_smp_atomic32_t do_block;
-    struct {
-	erts_smp_atomic32_t wait;
-	erts_smp_atomic32_t gc;
-	erts_smp_atomic32_t io;
-    } in_activity;
-} erts_system_block_state_t;
-
-extern erts_system_block_state_t erts_system_block_state;
-
-int erts_is_system_blocked(erts_activity_t allowed_activities);
-void erts_block_me(void (*prepare)(void *), void (*resume)(void *), void *arg);
-void erts_register_blockable_thread(void);
-void erts_unregister_blockable_thread(void);
-void erts_note_activity_begin(erts_activity_t activity);
-void
-erts_check_block(erts_activity_t old_activity,
-		 erts_activity_t new_activity,
-		 int locked,
-		 void (*prepare)(void *),
-		 void (*resume)(void *),
-		 void *arg);
-void erts_block_system(Uint32 allowed_activities);
-int erts_emergency_block_system(long timeout, Uint32 allowed_activities);
-void erts_release_system(void);
-void erts_system_block_init(void);
-void erts_set_activity_error(erts_activity_error_t, char *, int);
-#ifdef ERTS_ENABLE_LOCK_CHECK
-void erts_lc_activity_change_begin(void);
-void erts_lc_activity_change_end(void);
-int erts_lc_is_blocking(void);
-#define ERTS_LC_IS_BLOCKING \
-  (erts_smp_pending_system_block() && erts_lc_is_blocking())
-#endif
-#endif
-
-#define erts_smp_activity_begin(NACT, PRP, RSM, ARG)		\
-  erts_smp_set_activity(ERTS_ACTIVITY_UNDEFINED,		\
-			(NACT),					\
-			0,					\
-			(PRP),					\
-			(RSM),					\
-			(ARG),					\
-			__FILE__,				\
-			__LINE__)
-#define erts_smp_activity_change(OACT, NACT, PRP, RSM, ARG)	\
-  erts_smp_set_activity((OACT),					\
-			(NACT),					\
-			0,					\
-			(PRP),					\
-			(RSM),					\
-			(ARG),					\
-			__FILE__,				\
-			__LINE__)
-#define erts_smp_activity_end(OACT, PRP, RSM, ARG)		\
-  erts_smp_set_activity((OACT),					\
-			ERTS_ACTIVITY_UNDEFINED,		\
-			0,					\
-			(PRP),					\
-			(RSM),					\
-			(ARG),					\
-			__FILE__,				\
-			__LINE__)
-
-#define erts_smp_locked_activity_begin(NACT)			\
-  erts_smp_set_activity(ERTS_ACTIVITY_UNDEFINED,		\
-			(NACT),					\
-			1,					\
-			NULL,					\
-			NULL,					\
-			NULL,					\
-			__FILE__,				\
-			__LINE__)
-#define erts_smp_locked_activity_change(OACT, NACT)		\
-  erts_smp_set_activity((OACT),					\
-			(NACT),					\
-			1,					\
-			NULL,					\
-			NULL,					\
-			NULL,					\
-			__FILE__,				\
-			__LINE__)
-#define erts_smp_locked_activity_end(OACT)			\
-  erts_smp_set_activity((OACT),					\
-			ERTS_ACTIVITY_UNDEFINED,		\
-			1,					\
-			NULL,					\
-			NULL,					\
-			NULL,					\
-			__FILE__,				\
-			__LINE__)
-
-
-ERTS_GLB_INLINE int erts_smp_is_system_blocked(erts_activity_t allowed_activities);
-ERTS_GLB_INLINE void erts_smp_block_system(Uint32 allowed_activities);
-ERTS_GLB_INLINE int erts_smp_emergency_block_system(long timeout,
-						    Uint32 allowed_activities);
-ERTS_GLB_INLINE void erts_smp_release_system(void);
-ERTS_GLB_INLINE int erts_smp_pending_system_block(void);
-ERTS_GLB_INLINE void erts_smp_chk_system_block(void (*prepare)(void *),
-					       void (*resume)(void *),
-					       void *arg);
-ERTS_GLB_INLINE void
-erts_smp_set_activity(erts_activity_t old_activity,
-		      erts_activity_t new_activity,
-		      int locked,
-		      void (*prepare)(void *),
-		      void (*resume)(void *),
-		      void *arg,
-		      char *file,
-		      int line);
-
-#if ERTS_GLB_INLINE_INCL_FUNC_DEF
-
-
-ERTS_GLB_INLINE int
-erts_smp_is_system_blocked(erts_activity_t allowed_activities)
-{
-#ifdef ERTS_SMP
-    return erts_is_system_blocked(allowed_activities);
-#else
-    return 1;
-#endif
-}
-
-ERTS_GLB_INLINE void
-erts_smp_block_system(Uint32 allowed_activities)
-{
-#ifdef ERTS_SMP
-    erts_block_system(allowed_activities);
-#endif
-}
-
-ERTS_GLB_INLINE int
-erts_smp_emergency_block_system(long timeout, Uint32 allowed_activities)
-{
-#ifdef ERTS_SMP
-    return erts_emergency_block_system(timeout, allowed_activities);
-#else
-    return 0;
-#endif
-}
-
-ERTS_GLB_INLINE void
-erts_smp_release_system(void)
-{
-#ifdef ERTS_SMP
-    erts_release_system();
-#endif
-}
-
-ERTS_GLB_INLINE int
-erts_smp_pending_system_block(void)
-{
-#ifdef ERTS_SMP
-    return (int) erts_smp_atomic32_read_nob(&erts_system_block_state.do_block);
-#else
-    return 0;
-#endif
-}
-
-
-ERTS_GLB_INLINE void
-erts_smp_chk_system_block(void (*prepare)(void *),
-			  void (*resume)(void *),
-			  void *arg)
-{
-#ifdef ERTS_SMP
-    if (erts_smp_pending_system_block())
-	erts_block_me(prepare, resume, arg);
-#endif
-}
-
-ERTS_GLB_INLINE void
-erts_smp_set_activity(erts_activity_t old_activity,
-		      erts_activity_t new_activity,
-		      int locked,
-		      void (*prepare)(void *),
-		      void (*resume)(void *),
-		      void *arg,
-		      char *file,
-		      int line)
-{
-#ifdef ERTS_SMP
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    erts_lc_activity_change_begin();
-#endif
-    switch (old_activity) {
-    case ERTS_ACTIVITY_UNDEFINED:
-	break;
-    case ERTS_ACTIVITY_WAIT:
-	erts_smp_atomic32_dec_acqb(&erts_system_block_state.in_activity.wait);
-	if (locked) {
-	    /* You are not allowed to leave activity waiting
-	     * without supplying the possibility to block
-	     * unlocked.
-	     */
-	    erts_set_activity_error(ERTS_ACT_ERR_LEAVE_WAIT_UNLOCKED,
-				    file, line);
-	}
-	break;
-    case ERTS_ACTIVITY_GC:
-	erts_smp_atomic32_dec_acqb(&erts_system_block_state.in_activity.gc);
-	break;
-    case ERTS_ACTIVITY_IO:
-	erts_smp_atomic32_dec_acqb(&erts_system_block_state.in_activity.io);
-	break;
-    default:
-	erts_set_activity_error(ERTS_ACT_ERR_LEAVE_UNKNOWN_ACTIVITY,
-				file, line);
-	break;
-    }
-
-    /* We are not allowed to block when going to activity waiting... */
-    if (new_activity != ERTS_ACTIVITY_WAIT && erts_smp_pending_system_block())
-	erts_check_block(old_activity,new_activity,locked,prepare,resume,arg);
-
-    switch (new_activity) {
-    case ERTS_ACTIVITY_UNDEFINED:
-	break;
-    case ERTS_ACTIVITY_WAIT:
-	erts_smp_atomic32_inc_mb(&erts_system_block_state.in_activity.wait);
-	break;
-    case ERTS_ACTIVITY_GC:
-	erts_smp_atomic32_inc_mb(&erts_system_block_state.in_activity.gc);
-	break;
-    case ERTS_ACTIVITY_IO:
-	erts_smp_atomic32_inc_mb(&erts_system_block_state.in_activity.io);
-	break;
-    default:
-	erts_set_activity_error(ERTS_ACT_ERR_ENTER_UNKNOWN_ACTIVITY,
-				file, line);
-	break;
-    }
-
-    switch (new_activity) {
-    case ERTS_ACTIVITY_WAIT:
-    case ERTS_ACTIVITY_GC:
-    case ERTS_ACTIVITY_IO:
-	if (erts_smp_pending_system_block())
-	    erts_note_activity_begin(new_activity);
-	break;
-    default:
-	break;
-    }
-
-#ifdef ERTS_ENABLE_LOCK_CHECK
-    erts_lc_activity_change_end();
-#endif
-
-#endif
-}
-
-#endif /* #if ERTS_GLB_INLINE_INCL_FUNC_DEF */
 
 #if defined(DEBUG) || defined(ERTS_ENABLE_LOCK_CHECK)
 #undef ERTS_REFC_DEBUG
@@ -1244,6 +995,19 @@ void erl_bin_write(unsigned char *, int, int);
 #  define realloc  sys_realloc
 #  define free sys_free
 
+#endif
+
+#ifdef __WIN32__
+#ifdef ARCH_64
+#define ERTS_ALLOC_ALIGN_BYTES 16
+#define ERTS_SMALL_ABS(Small) _abs64(Small) 
+#else
+#define ERTS_ALLOC_ALIGN_BYTES 8
+#define ERTS_SMALL_ABS(Small) labs(Small) 
+#endif
+#else
+#define ERTS_ALLOC_ALIGN_BYTES 8
+#define ERTS_SMALL_ABS(Small) labs(Small) 
 #endif
 
 

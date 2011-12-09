@@ -19,6 +19,7 @@
 -module(release_handler_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
+-include("test_lib.hrl").
 
 -compile(export_all).
 
@@ -30,6 +31,7 @@ suite() ->
     [{ct_hooks, [ts_install_cth]}].
 
 init_per_suite(Config) ->
+    init_priv_dir(Config),
     application:start(sasl),
     Config.
 
@@ -58,7 +60,10 @@ cases() ->
     [otp_2740, otp_2760, otp_5761, otp_9402, otp_9417,
      otp_9395_check_old_code, otp_9395_check_and_purge,
      otp_9395_update_many_mods, otp_9395_rm_many_mods,
-     instructions, eval_appup, supervisor_which_children_timeout].
+     instructions, eval_appup, eval_appup_with_restart,
+     supervisor_which_children_timeout,
+     release_handler_which_releases, install_release_syntax_check,
+     upgrade_supervisor, upgrade_supervisor_fail].
 
 groups() ->
     [{release,[],
@@ -69,6 +74,7 @@ groups() ->
      {release_single,[],
       [
        upgrade,
+       upgrade_restart,
        client1,
        client2
       ]},
@@ -82,7 +88,7 @@ groups() ->
 init_per_group(release, Config) ->
     Dog = ?t:timetrap(?default_timeout),
     P1gInstall = filename:join(priv_dir(Config),p1g_install),
-    ok = do_create_p1g(Config,P1gInstall),
+    ok = create_p1g(Config,P1gInstall),
     ok = create_p1h(Config),
     ?t:timetrap_cancel(Dog);
 
@@ -95,6 +101,7 @@ init_per_group(release_single, Config) ->
     %% Create some more releases to upgrade to
     ok = create_p1i(Config),
     ok = create_p2a(Config),
+    ok = create_p2b(Config),
 
     ?t:timetrap_cancel(Dog);
 
@@ -155,7 +162,7 @@ end_per_group(release, Config) ->
 	{win32,_} -> delete_all_services();
 	_ -> ok
     end,
-    delete_release(Config),
+    clean_priv_dir(Config,true),
     ?t:timetrap_cancel(Dog),
     Config;
 end_per_group(_GroupName, Config) ->
@@ -191,7 +198,10 @@ end_per_testcase(Case, Config) ->
 	    FailDir = filename:join(SaveDir,lists:concat(["failed-",Case])),
 	    ok = filelib:ensure_dir(filename:join(FailDir,"*")),
 
-	    LogDirs = filelib:wildcard(filename:join([PrivDir,"*",log])),
+	    LogDirs =
+		filelib:wildcard(filename:join([PrivDir,"*",log])) ++
+		filelib:wildcard(filename:join([PrivDir,"*",clients,
+						type1,"*",log])),
 
 	    lists:foreach(
 	      fun(LogDir) ->
@@ -236,7 +246,7 @@ break(Config) ->
 	?t:break(priv_dir(Config)),
 	ok.
 
-%% Test upgrade and downgrade of erts
+%% Test upgrade and downgrade of erts and other apps on embedded node
 upgrade(Conf) when is_list(Conf) ->
     reg_print_proc(), %% starts a printer process on test_server node
     ?t:format("upgrade ~p~n",[reg_print_proc]),
@@ -259,54 +269,75 @@ upgrade(Conf) when is_list(Conf) ->
     stop_cover(TestNode),
     reboot_and_wait(TestNode,"install_2",[a]),
 
-    %% check that P1H is permanent, unpack and install P1I, unpack and install P2A
-    TestNodeInit1 = rpc:call(TestNode,erlang,whereis,[init]),
+    %% check that P1H is permanent, unpack and install P1I, unpack P2A
     ok = rpc_inst(TestNode, install_3, [PrivDir]),
     stop_cover(TestNode),
-    ok = rpc_inst(TestNode, install_3a, []),
-    wait_nodes_up([{TestNode,TestNodeInit1}],"install_3",[a]),
+    reboot_and_wait(TestNode,"install_3",[a]),
 
-    %% check that P2A is used, reboot from P1I
-    ok = rpc_inst(TestNode, install_4, []),
+    %% check that P1H is used, install P2A
+    TestNodeInit1 = rpc:call(TestNode,erlang,whereis,[init]),
     stop_cover(TestNode),
-    reboot_and_wait(TestNode,"install_4",[a]),
+    ok = rpc_inst(TestNode, install_4, []),
+    wait_nodes_up([{TestNode,TestNodeInit1}],"install_4",[a]),
 
-    %% check that P1I, reinstall P2A
+    %% check that P2A is used, then downgrade to P1I
     TestNodeInit2 = rpc:call(TestNode,erlang,whereis,[init]),
     ok = rpc_inst(TestNode, install_5, []),
     stop_cover(TestNode),
     ok = rpc_inst(TestNode, install_5a, []),
     wait_nodes_up([{TestNode,TestNodeInit2}],"install_5",[a]),
 
-    %% check that P2A is used, make P2A permanent
+    %% Check that P1I is used, then make P1I permanent and install P2A
+    TestNodeInit3 = rpc:call(TestNode,erlang,whereis,[init]),
     ok = rpc_inst(TestNode, install_6, []),
     stop_cover(TestNode),
-    reboot_and_wait(TestNode,"install_6",[a]),
+    ok = rpc_inst(TestNode, install_6a, []),
+    wait_nodes_up([{TestNode,TestNodeInit3}],"install_6",[a]),
 
-    %% check that P2A is permanent, install old P1H
-    TestNodeInit3 = rpc:call(TestNode,erlang,whereis,[init]),
-    stop_cover(TestNode),
+    %% check that P2A is used, then downgrade to P1H
+    TestNodeInit4 = rpc:call(TestNode,erlang,whereis,[init]),
     ok = rpc_inst(TestNode, install_7, []),
-    wait_nodes_up([{TestNode,TestNodeInit3}],"install_7",[a]),
+    stop_cover(TestNode),
+    ok = rpc_inst(TestNode, install_7a, []),
+    wait_nodes_up([{TestNode,TestNodeInit4}],"install_7",[a]),
 
-    %% check that P1H is permanent, remove P1I and P2A
+    %% check that P1H is used, then install P1I and check that it is permanent
+    %% then reinstall P2A
+    TestNodeInit5 = rpc:call(TestNode,erlang,whereis,[init]),
     ok = rpc_inst(TestNode, install_8, []),
     stop_cover(TestNode),
-    reboot_and_wait(TestNode,"install_8",[a]),
+    ok = rpc_inst(TestNode, install_8a, []),
+    wait_nodes_up([{TestNode,TestNodeInit5}],"install_8",[a]),
+
+    %% check that P2A is used, make P2A permanent
+    ok = rpc_inst(TestNode, install_9, []),
+    stop_cover(TestNode),
+    reboot_and_wait(TestNode,"install_9",[a]),
+
+    %% check that P2A is permanent, reboot to old P1H
+    TestNodeInit6 = rpc:call(TestNode,erlang,whereis,[init]),
+    stop_cover(TestNode),
+    ok = rpc_inst(TestNode, install_10, []),
+    wait_nodes_up([{TestNode,TestNodeInit6}],"install_10",[a]),
+
+    %% check that P1H is permanent, remove P1I and P2A
+    ok = rpc_inst(TestNode, install_11, []),
+    stop_cover(TestNode),
+    reboot_and_wait(TestNode,"install_11",[a]),
 
     %% check that P1H is permanent, reboot old P1G
-    TestNodeInit4 = rpc:call(TestNode,erlang,whereis,[init]),
+    TestNodeInit7 = rpc:call(TestNode,erlang,whereis,[init]),
     stop_cover(TestNode),
-    ok = rpc_inst(TestNode, install_9, []),
-    wait_nodes_up([{TestNode,TestNodeInit4}],"install_9"),
+    ok = rpc_inst(TestNode, install_12, []),
+    wait_nodes_up([{TestNode,TestNodeInit7}],"install_12"),
 
     %% check that P1G is permanent, remove P1H
-    ok = rpc_inst(TestNode, install_10, []),
+    ok = rpc_inst(TestNode, install_13, []),
     stop_cover(TestNode),
-    reboot_and_wait(TestNode,"install_10"),
+    reboot_and_wait(TestNode,"install_13"),
 
     %% check that P1G is permanent
-    ok = rpc_inst(TestNode, install_11, []),
+    ok = rpc_inst(TestNode, install_14, []),
 
     ok.
 
@@ -321,6 +352,54 @@ reboot_and_wait(Node,Tag,Apps) ->
     InitPid = rpc:call(Node,erlang,whereis,[init]),
     ok = rpc:call(Node,init,reboot,[]),
     wait_nodes_up([{Node,InitPid}],Tag,Apps).
+
+
+%% Test upgrade and downgrade of erts in combination with the
+%% restart_emulator option to systools:make_relup. For upgrade, this
+%% should cause one restart before the upgrade code, and one
+%% after. For downgrade, there will be one restart only - at the end.
+upgrade_restart(Conf) when is_list(Conf) ->
+    reg_print_proc(), %% starts a printer process on test_server node
+    ?t:format("upgrade_restart ~p~n",[reg_print_proc]),
+    PrivDir = priv_dir(Conf),
+    Sname = tc_sname(Conf), % nodename for use in this testcase
+
+    %% Copy the P1G release to a directory for use in this testcase
+    ok = copy_installed(Conf,p1g_install,[Sname]),
+
+    %% start the test node
+    [TestNode] = start_nodes(Conf,[Sname],"upgrade_restart start"),
+
+    %% unpack and install P2B
+    TestNodeInit1 = rpc:call(TestNode,erlang,whereis,[init]),
+    ok = rpc_inst(TestNode, upgrade_restart_1, [PrivDir]),
+    stop_cover(TestNode),
+    ok = rpc_inst(TestNode, upgrade_restart_1a, []),
+    wait_nodes_up([{TestNode,TestNodeInit1}],"upgrade_restart_1",[a]),
+
+    %% install P1G
+    case rpc_inst(TestNode, upgrade_restart_2, []) of
+	ok ->
+	    ok;
+	{wait,TestNodeInit2a} ->
+	    %% We catched the node too early - it was supposed to
+	    %% restart twice, so let's wait for one more restart.
+	    wait_nodes_up([{TestNode,TestNodeInit2a}],"upgrade_restart_2a",[]),
+	    ok = rpc_inst(TestNode, upgrade_restart_2a, [])
+    end,
+    TestNodeInit2 = rpc:call(TestNode,erlang,whereis,[init]),
+    stop_cover(TestNode),
+    ok = rpc_inst(TestNode, upgrade_restart_2b, []),
+    wait_nodes_up([{TestNode,TestNodeInit2}],"upgrade_restart_2b",[]),
+
+    %% Check that P1G is going again
+    ok = rpc_inst(TestNode, upgrade_restart_3, []),
+
+    ok.
+
+upgrade_restart(cleanup,Config) ->
+    TestNode = tc_full_node_name(Config),
+    ok = stop_nodes([TestNode]).
 
 
 %% Test upgrade and downgrade of erts, diskless
@@ -542,8 +621,50 @@ supervisor_which_children_timeout(Conf) ->
 
     ok.
 
-supervisor_which_children_timeout(cleanup, Conf) ->
+supervisor_which_children_timeout(cleanup, _Conf) ->
     stop_node(node_name(supervisor_which_children_timeout)).
+
+
+%% Test that check_install_release will fail for illegal relup
+%% instructions, even after point of no return.
+install_release_syntax_check(Conf) when is_list(Conf) ->
+
+    S1 = [point_of_no_return, illegal_instruction],
+    {error,{illegal_instruction_after_point_of_no_return,illegal_instruction}} =
+	release_handler_1:check_script(S1,[]),
+
+    S2 = [point_of_no_return,restart_new_emulator],
+    {error,{illegal_instruction_after_point_of_no_return,restart_new_emulator}} =
+	release_handler_1:check_script(S2,[]),
+
+    ok.
+
+
+%%-----------------------------------------------------------------
+%% release_handler:which_releases/0 and 1 test
+%%-----------------------------------------------------------------
+release_handler_which_releases(Conf) ->
+    PrivDir = priv_dir(Conf),
+    Dir = filename:join(PrivDir,"release_handler_which_releases"),
+    DataDir = ?config(data_dir,Conf),
+    LibDir = filename:join([DataDir,release_handler_timeouts]),
+
+    Rel1 = create_and_install_fake_first_release(Dir,[{dummy,"0.1",LibDir}]),
+
+    {ok, Node} = t_start_node(release_handler_which_releases, Rel1, []),
+    Releases0 = rpc:call(Node, release_handler, which_releases, []),
+    Releases1 = rpc:call(Node, release_handler, which_releases, [permanent]),
+    Releases2 = rpc:call(Node, release_handler, which_releases, [old]),
+
+    1 = length(Releases0),
+    1 = length(Releases1),
+    0 = length(Releases2),
+
+    ?t:format("release_handler:which_releases/0: ~p~n", [Releases0]),
+    ?t:format("release_handler:which_releases/1: ~p~n", [Releases1]),
+    ?t:format("release_handler:which_releases/1: ~p~n", [Releases2]),
+
+    ok.
 
 %%-----------------------------------------------------------------
 %% Ticket: OTP-2740
@@ -1085,6 +1206,109 @@ otp_9395_rm_many_mods(cleanup,_Conf) ->
     stop_node(node_name(otp_9395_rm_many_mods)).
 
 
+upgrade_supervisor(Conf) when is_list(Conf) ->
+    %% Set some paths
+    PrivDir = priv_dir(Conf),
+    Dir = filename:join(PrivDir,"upgrade_supervisor"),
+    LibDir = filename:join(?config(data_dir, Conf), "lib"),
+
+    %% Create the releases
+    Lib1 = [{a,"1.0",LibDir}],
+    Lib2 = [{a,"9.0",LibDir}],
+    Rel1 = create_and_install_fake_first_release(Dir,Lib1),
+    Rel2 = create_fake_upgrade_release(Dir,"2",Lib2,{[Rel1],[Rel1],[LibDir]}),
+    Rel1Dir = filename:dirname(Rel1),
+    Rel2Dir = filename:dirname(Rel2),
+
+    %% Start a slave node
+    {ok, Node} = t_start_node(upgrade_supervisor, Rel1,
+			      filename:join(Rel1Dir,"sys.config")),
+
+    %% Check path
+    Dir1 = filename:join([LibDir, "a-1.0"]),
+    Dir1 = rpc:call(Node, code, lib_dir, [a]),
+    ASupBeam1 = filename:join([Dir1,ebin,"a_sup.beam"]),
+    ASupBeam1 = rpc:call(Node, code, which, [a_sup]),
+
+    %% Install second release, with no changed modules
+    {ok, RelVsn2} = rpc:call(Node, release_handler, set_unpacked,
+			     [Rel2++".rel", Lib2]),
+    ok = rpc:call(Node, release_handler, install_file,
+		  [RelVsn2, filename:join(Rel2Dir, "relup")]),
+    ok = rpc:call(Node, release_handler, install_file,
+		  [RelVsn2, filename:join(Rel2Dir, "start.boot")]),
+    ok = rpc:call(Node, release_handler, install_file,
+		  [RelVsn2, filename:join(Rel2Dir, "sys.config")]),
+
+    {ok, _RelVsn1, []} =
+	rpc:call(Node, release_handler, install_release, [RelVsn2]),
+
+    %% Check that libdir is changed
+    Dir2 = filename:join([LibDir, "a-9.0"]),
+    Dir2 = rpc:call(Node, code, lib_dir, [a]),
+    ASupBeam2 = filename:join([Dir2,ebin,"a_sup.beam"]),
+    ASupBeam2 = rpc:call(Node, code, which, [a_sup]),
+
+    %% Check that the restart strategy and child spec is updated
+    {status, _, {module, _}, [_, _, _, _, [_,_,{data,[{"State",State}]}]]} =
+	rpc:call(Node,sys,get_status,[a_sup]),
+    {state,_,RestartStrategy,[Child],_,_,_,_,_,_} = State,
+    one_for_all = RestartStrategy, % changed from one_for_one
+    {child,_,_,_,_,brutal_kill,_,_} = Child, % changed from timeout 2000
+
+    ok.
+
+%% Check that if the supervisor fails, then the upgrade is rolled back
+%% and an ok error message is returned
+upgrade_supervisor_fail(Conf) when is_list(Conf) ->
+    %% Set some paths
+    PrivDir = priv_dir(Conf),
+    Dir = filename:join(PrivDir,"upgrade_supervisor_fail"),
+    LibDir = filename:join(?config(data_dir, Conf), "lib"),
+
+    %% Create the releases
+    Lib1 = [{a,"1.0",LibDir}],
+    Lib2 = [{a,"9.1",LibDir}],
+    Rel1 = create_and_install_fake_first_release(Dir,Lib1),
+    Rel2 = create_fake_upgrade_release(Dir,"2",Lib2,{[Rel1],[Rel1],[LibDir]}),
+    Rel1Dir = filename:dirname(Rel1),
+    Rel2Dir = filename:dirname(Rel2),
+
+    %% Start a slave node
+    {ok, Node} = t_start_node(upgrade_supervisor_fail, Rel1,
+			      filename:join(Rel1Dir,"sys.config")),
+
+    %% Check path
+    Dir1 = filename:join([LibDir, "a-1.0"]),
+    Dir1 = rpc:call(Node, code, lib_dir, [a]),
+    ASupBeam1 = filename:join([Dir1,ebin,"a_sup.beam"]),
+    ASupBeam1 = rpc:call(Node, code, which, [a_sup]),
+
+    %% Install second release, with no changed modules
+    {ok, RelVsn2} = rpc:call(Node, release_handler, set_unpacked,
+			     [Rel2++".rel", Lib2]),
+    ok = rpc:call(Node, release_handler, install_file,
+		  [RelVsn2, filename:join(Rel2Dir, "relup")]),
+    ok = rpc:call(Node, release_handler, install_file,
+		  [RelVsn2, filename:join(Rel2Dir, "start.boot")]),
+    ok = rpc:call(Node, release_handler, install_file,
+		  [RelVsn2, filename:join(Rel2Dir, "sys.config")]),
+    ok = net_kernel:monitor_nodes(true),
+
+    {error,{code_change_failed,_Pid,a_sup,_Vsn,
+	    {error,{invalid_shutdown,brutal_kil}}}} =
+	rpc:call(Node, release_handler, install_release, [RelVsn2]),
+
+    %% Check that the upgrade is terminated - normally this would mean
+    %% rollback, but since this testcase is very simplified the node
+    %% is not started with heart supervision and will therefore not be
+    %% restarted. So we just check that the node goes down.
+    receive {nodedown,Node} -> ok
+    after 10000 -> ct:fail(failed_upgrade_never_restarted_node)
+    end,
+
+    ok.
+
 
 %% Test upgrade and downgrade of applications
 eval_appup(Conf) when is_list(Conf) ->
@@ -1107,6 +1331,12 @@ eval_appup(Conf) when is_list(Conf) ->
     App11Dir = code:lib_dir(app1),
     ok = gen_server:call(harry, error),
 
+    %% Read appup script
+    {ok,"2.0",UpScript} = release_handler:upgrade_script(app1,App12Dir),
+    [{load_object_code,_},
+     point_of_no_return,
+     {load,_}] = UpScript,
+
     %% Upgrade to app1-2.0
     {ok, []} = release_handler:upgrade_app(app1, App12Dir),
     App12Dir = code:lib_dir(app1),
@@ -1116,6 +1346,12 @@ eval_appup(Conf) when is_list(Conf) ->
     %% Value of config parameter 'var' should now be 'val2'
     %% (see myrel/lib2/app1-2.0/ebin/app1.app)
     [{var,val2}] = ets:lookup(otp_6162, var),
+
+    %% Read appup script
+    {ok,DnScript} = release_handler:downgrade_script(app1,"1.0",App11Dir),
+    [{load_object_code,_},
+     point_of_no_return,
+     {load,_}] = DnScript,
 
     %% Downgrade to app1-1.0
     {ok, []} = release_handler:downgrade_app(app1,"1.0",App11Dir),
@@ -1134,6 +1370,85 @@ eval_appup(Conf) when is_list(Conf) ->
     ok.
 
 
+%% Test upgrade and downgrade of applications when appup contains
+%% restart_emulator and restart_new_emulator instructions
+eval_appup_with_restart(Conf) when is_list(Conf) ->
+
+    %% Set some paths
+    RelDir = filename:join(?config(data_dir, Conf), "app1_app2"),
+    App11Dir = filename:join([RelDir, "lib1", "app1-1.0"]),
+    App13Dir = filename:join([RelDir, "lib3", "app1-3.0"]), %restart_emulator
+    App14Dir = filename:join([RelDir, "lib4", "app1-4.0"]), %restart_new_emulator
+    EbinDir1 = filename:join(App11Dir, "ebin"),
+    EbinDir3 = filename:join(App13Dir, "ebin"),
+    EbinDir4 = filename:join(App14Dir, "ebin"),
+
+    %% Start app1-1.0
+    code:add_patha(EbinDir1),
+    ok = application:start(app1),
+    App11Dir = code:lib_dir(app1),
+
+    %% Read appup script
+    {ok,"3.0",UpScript3} = release_handler:upgrade_script(app1,App13Dir),
+    [{load_object_code,_},
+     point_of_no_return,
+     {load,_},
+     restart_emulator] = UpScript3,
+
+    %% Upgrade to app1-3.0 - restart_emulator
+    restart_emulator = release_handler:upgrade_app(app1, App13Dir),
+    App13Dir = code:lib_dir(app1),
+
+    %% Fake full upgrade to 3.0
+    {ok,AppSpec} = file:consult(filename:join([App13Dir,"ebin","app1.app"])),
+    application_controller:change_application_data(AppSpec,[]),
+
+    %% Read appup script
+    {ok,"4.0",UpScript4} = release_handler:upgrade_script(app1,App14Dir),
+    [restart_new_emulator,point_of_no_return] = UpScript4,
+
+    %% Try pgrade to app1-4.0 - restart_new_emulator
+    {error,restart_new_emulator} = release_handler:upgrade_app(app1, App14Dir),
+    App13Dir = code:lib_dir(app1),
+
+    %% Read appup script
+    {ok,DnScript1} = release_handler:downgrade_script(app1,"1.0",App11Dir),
+    [{load_object_code,_},
+     point_of_no_return,
+     {load,_},
+     restart_emulator] = DnScript1,
+
+    %% Still running 3.0 - downgrade to app1-1.0 - restart_emulator
+    restart_emulator = release_handler:downgrade_app(app1,"1.0",App11Dir),
+    App11Dir = code:lib_dir(app1),
+
+    ok = application:stop(app1),
+    ok = application:unload(app1),
+    true = code:del_path(EbinDir1),
+
+    %% Start again as version 4.0
+    code:add_patha(EbinDir4),
+    ok = application:start(app1),
+    App14Dir = code:lib_dir(app1),
+
+    %% Read appup script
+    {ok,DnScript3} = release_handler:downgrade_script(app1,"3.0",App13Dir),
+    [point_of_no_return,restart_emulator] = DnScript3,
+
+    %% Downgrade to app1-3.0 - restart_new_emulator
+    restart_emulator = release_handler:downgrade_app(app1,"3.0",App13Dir),
+    App13Dir = code:lib_dir(app1),
+
+    ok = application:stop(app1),
+    ok = application:unload(app1),
+
+    true = code:del_path(EbinDir3),
+    false = code:del_path(EbinDir1),
+    false = code:del_path(EbinDir4),
+
+    ok.
+
+
 %% Test the example/target_system.erl module
 target_system(Conf) when is_list(Conf) ->
     PrivDir = priv_dir(Conf),
@@ -1147,11 +1462,10 @@ target_system(Conf) when is_list(Conf) ->
 
 
     %% Create the .rel file
-    ErtsVsn = erlang:system_info(version),
     RelName = filename:join(TargetCreateDir,"ts-1.0"),
     RelFile = RelName++".rel",
     RelVsn = "R1A",
-    create_rel_file(RelFile,RelName,RelVsn,ErtsVsn,[{a, "1.0"}]),
+    create_rel_file(RelFile,RelName,RelVsn,current,[{a, "1.0"}]),
 
     %% Build the target_system module
     ExamplesEbin = filename:join([code:lib_dir(sasl),examples,ebin]),
@@ -1179,11 +1493,13 @@ target_system(Conf) when is_list(Conf) ->
     code:del_path(TSPath),
 
     %% Check that all files exist in installation
-    true = filelib:is_dir(filename:join(TargetInstallDir,"erts-"++ErtsVsn)),
+    ErtsDir = app_dir(erts,current),
+    true = filelib:is_dir(filename:join(TargetInstallDir,ErtsDir)),
     LibDir = filename:join(TargetInstallDir,lib),
-    {ok,KernelVsn} = application:get_key(kernel,vsn),
-    {ok,StdlibVsn} = application:get_key(stdlib,vsn),
-    {ok,SaslVsn} = application:get_key(sasl,vsn),
+    KernelVsn = vsn(kernel,current),
+    StdlibVsn = vsn(stdlib,current),
+    SaslVsn = vsn(sasl,current),
+    RelFileBasename = filename:basename(RelFile),
     true = filelib:is_dir(filename:join(LibDir,"kernel-"++KernelVsn)),
     true = filelib:is_dir(filename:join(LibDir,"stdlib-"++StdlibVsn)),
     true = filelib:is_dir(filename:join(LibDir,"sasl-"++SaslVsn)),
@@ -1191,10 +1507,10 @@ target_system(Conf) when is_list(Conf) ->
     RelDir = filename:join(TargetInstallDir,releases),
     true = filelib:is_regular(filename:join(RelDir,"RELEASES")),
     true = filelib:is_regular(filename:join(RelDir,"start_erl.data")),
-    true = filelib:is_regular(filename:join(RelDir,
-						  filename:basename(RelFile))),
+    true = filelib:is_regular(filename:join(RelDir,RelFileBasename)),
     true = filelib:is_dir(filename:join(RelDir,RelVsn)),
     true = filelib:is_regular(filename:join([RelDir,RelVsn,"start.boot"])),
+    true = filelib:is_regular(filename:join([RelDir,RelVsn,RelFileBasename])),
     BinDir = filename:join(TargetInstallDir,bin),
     true = filelib:is_regular(filename:join(BinDir,"start.boot")),
     true = filelib:is_regular(filename:join(BinDir,erl)),
@@ -1205,6 +1521,7 @@ target_system(Conf) when is_list(Conf) ->
     true = filelib:is_regular(filename:join(BinDir,to_erl)),
 
     %% Check content of files
+    ErtsVsn = vsn(erts,current),
     {ok,SED} = file:read_file(filename:join(RelDir,"start_erl.data")),
     [ErtsVsn,RelVsn] = string:tokens(binary_to_list(SED),"\s\n"),
     ok.
@@ -1456,7 +1773,7 @@ copy_client(Conf,Master,Sname,Client) ->
     ok.
 
 
-delete_release(Conf) ->
+clean_priv_dir(Conf,Save) ->
     PrivDir = priv_dir(Conf),
 
     {ok, OrigWd} = file:get_cwd(),
@@ -1466,7 +1783,7 @@ delete_release(Conf) ->
     {ok, Dirs} = file:list_dir(PrivDir),
     ?t:format("========  deleting  ~p~n",[Dirs]),
 
-    ok = delete_release_os(Dirs--["save"]),
+    ok = clean_dirs_os(Dirs,Save),
     {ok,Remaining} = file:list_dir(PrivDir),
     ?t:format("========  remaining  ~p~n",[Remaining]),
 
@@ -1474,7 +1791,7 @@ delete_release(Conf) ->
 	[] ->
 	    ok;
 	_ ->
-	    delete_release_os(Remaining),
+	    clean_dirs_os(Remaining,Save),
 	    Remaining2 = file:list_dir(PrivDir),
 	    ?t:format("========  remaining after second try ~p~n",[Remaining2])
     end,
@@ -1483,22 +1800,22 @@ delete_release(Conf) ->
     ok.
 
 
-delete_release_os(Dirs) ->
+clean_dirs_os(Dirs,Save) ->
     case os:type() of
 	{unix, _} ->
-	    delete_release_unix(Dirs);
+	    clean_dirs_unix(Dirs,Save);
 	{win32, _} ->
-	    delete_release_win32(Dirs);
+	    clean_dirs_win32(Dirs,Save);
 	Os ->
 	    test_server:fail({error, {not_yet_implemented_os, Os}})
     end.
 
 
-delete_release_unix([]) ->
+clean_dirs_unix([],_) ->
     ok;
-delete_release_unix(["save"|Dirs]) ->
-    delete_release_unix(Dirs);
-delete_release_unix([Dir|Dirs]) ->
+clean_dirs_unix(["save"|Dirs],Save) when Save ->
+    clean_dirs_unix(Dirs,Save);
+clean_dirs_unix([Dir|Dirs],Save) ->
     Rm = string:concat("rm -rf ", Dir),
     ?t:format("============== COMMAND ~p~n",[Rm]),
     case file:list_dir(Dir) of
@@ -1515,13 +1832,13 @@ delete_release_unix([Dir|Dirs]) ->
 		  ?t:format("------- ls -al  ~p~n",[os:cmd("ls -al " ++ Dir)])
 	  end,
 
-    delete_release_unix(Dirs).
+    clean_dirs_unix(Dirs,Save).
 
-delete_release_win32([]) ->
+clean_dirs_win32([],_) ->
     ok;
-delete_release_win32(["save"|Dirs]) ->
-    delete_release_win32(Dirs);
-delete_release_win32([Dir|Dirs]) ->
+clean_dirs_win32(["save"|Dirs],Save) when Save ->
+    clean_dirs_win32(Dirs,Save);
+clean_dirs_win32([Dir|Dirs],Save) ->
     Rm =
        case filelib:is_dir(Dir) of
           true ->
@@ -1531,7 +1848,7 @@ delete_release_win32([Dir|Dirs]) ->
        end,
     ?t:format("============== COMMAND ~p~n",[Rm]),
     [] = os:cmd(Rm),
-    delete_release_win32(Dirs).
+    clean_dirs_win32(Dirs,Save).
 
 
 node_name(Sname) when is_atom(Sname) ->
@@ -1657,9 +1974,17 @@ priv_dir(Conf) ->
 %%    filename:absname(?config(priv_dir, Conf)). % Get rid of trailing slash
     %% Due to problem with long paths on windows => creating a new
     %% priv_dir under data_dir
+    filename:absname(filename:join(?config(data_dir, Conf),priv_dir)).
+
+init_priv_dir(Conf) ->
     Dir = filename:absname(filename:join(?config(data_dir, Conf),priv_dir)),
-    filelib:ensure_dir(filename:join(Dir,"*")),
-    Dir.
+    case filelib:is_dir(Dir) of
+	true ->
+	    clean_priv_dir(Conf,false);
+	false ->
+	    ok
+    end,
+    filelib:ensure_dir(filename:join(Dir,"*")).
 
 latest_version(Dir) ->
     List = filelib:wildcard(Dir ++ "*"),
@@ -1694,14 +2019,22 @@ stop_print_proc() ->
 
 %% Create the first target release, vsn P1G. This release is used for
 %% all test cases in {group,release}
-create_p1g(Conf,Sname) ->
-    do_create_p1g(Conf,filename:join(priv_dir(Conf),Sname)).
-
-do_create_p1g(Conf,TargetDir) ->
-    PrivDir = priv_dir(Conf),
+create_p1g(Conf,TargetDir) ->
     DataDir = ?config(data_dir,Conf),
-    ErtsVsn = "4.4",
-    ErtsDir = "erts-"++ErtsVsn,
+    PrivDir = priv_dir(Conf),
+    ErtsDir = app_dir(erts,old),
+    KernelDir = app_dir(kernel,old),
+    StdlibDir = app_dir(stdlib,old),
+
+    %% Fake earlier version of kernel and stdlib
+    SystemLib = system_lib(PrivDir),
+    ok = filelib:ensure_dir(filename:join(SystemLib,"*")),
+    KernelLib = code:lib_dir(kernel),
+    StdlibLib = code:lib_dir(stdlib),
+    ok = copy_tree(Conf,KernelLib,KernelDir,SystemLib),
+    ok = copy_tree(Conf,StdlibLib,StdlibDir,SystemLib),
+    fix_version(SystemLib,kernel),
+    fix_version(SystemLib,stdlib),
 
     %% Create dirs
     BinDir = filename:join(TargetDir,bin),
@@ -1745,17 +2078,15 @@ do_create_p1g(Conf,TargetDir) ->
     RelFileName = filename:join(RelDir,RelName),
     RelFile = RelFileName ++ ".rel",
     ok = filelib:ensure_dir(RelFile),
-    LibPath = filename:join([DataDir,lib,"*",ebin]),
 
-    TarFile = create_basic_release(Conf, RelFile, RelVsn, {ErtsVsn,false},
-				   LibPath, [], [], [], []),
+    TarFile = create_basic_release(Conf,RelFile,RelVsn,{old,false}),
 
     %% Extract tar file in target directory (i.e. same directory as erts etc.)
     ok = erl_tar:extract(TarFile, [{cwd, TargetDir}, compressed]),
 
     %% Create start_erl.data
     StartErlDataFile = filename:join([ReleasesDir, "start_erl.data"]),
-    StartErlData = io_lib:fwrite("~s ~s~n", [ErtsVsn, RelVsn]),
+    StartErlData = io_lib:fwrite("~s ~s~n", [vsn(erts,old), RelVsn]),
     ok = file:write_file(StartErlDataFile, StartErlData),
 
     %% Create RELEASES
@@ -1763,60 +2094,98 @@ do_create_p1g(Conf,TargetDir) ->
 
     ok.
 
+fix_version(SystemLib,App) ->
+    FromVsn = vsn(App,current),
+    ToVsn = vsn(App,old),
+    Rootname = filename:join([SystemLib,app_dir(App,old),ebin,atom_to_list(App)]),
+
+    AppFile = Rootname ++ ".app",
+    {ok,OrigApp} = file:read_file(AppFile),
+    ok = file:write_file(AppFile,re:replace(OrigApp,FromVsn,ToVsn,
+					    [{return,binary}])),
+    AppupFile = Rootname ++ ".appup",
+    {ok,OrigAppup} = file:read_file(AppupFile),
+    ok = file:write_file(AppupFile,re:replace(OrigAppup,FromVsn,ToVsn,
+					      [{return,binary}])).
+
+
 %% Create version P1H - which is P1G + a-1.0
 %% Must have run create_p1g first!!
 create_p1h(Conf) ->
-    create_upgrade_release(Conf,"rel1","P1H",{"4.4",false},[{a,"1.0"}],
-			   [{a,[{key2,val2}]}],{"rel0",[new_appl]}).
+    create_upgrade_release(Conf,"rel1","P1H",{old,false},[{a,"1.0"}],
+			   [{a,[{key2,val2}]}],[{"rel0",[new_appl]}]).
 
 %% Create version P1I - which is P1H, but with application a upgraded to a-1.1
 %% Must have run create_p1h first!!
 create_p1i(Conf) ->
-    create_upgrade_release(Conf,"rel2","P1I",{"4.4",false},[{a,"1.1"}],
+    create_upgrade_release(Conf,"rel2","P1I",{old,false},[{a,"1.1"}],
 			   [{a,[{key2,newval2}]}],
-			   {"rel1",[{extra,gott}]}).
+			   [{"rel1",[{extra,gott}]}]).
 
 %% Create version P2A - which is P1I, but with erts-<latest>
 %% Must have run create_p1i first!!
 create_p2a(Conf) ->
-    ErtsVsn = erlang:system_info(version),
-    create_upgrade_release(Conf,"rel3","P2A",{ErtsVsn,code:root_dir()},
+    create_upgrade_release(Conf,"rel3","P2A",{current,code:root_dir()},
 			   [{a,"1.1"}],[{a,[{key2,newval2}]}],
-			   {"rel2",[new_emu]}).
+			   [{"rel1",[new_emu,new_appl]},{"rel2",[new_emu]}],
+			   [{"rel1",[old_emu,old_appl]},{"rel2",[old_emu]}]).
+
+%% Create version P2B - which is P2A, but with relup containing an
+%% extra reboot.
+%% Can be upgraded to from P1G - so must have run create_p1g first!!
+create_p2b(Conf) ->
+    create_upgrade_release(Conf,"rel4","P2B",{current,code:root_dir()},
+			   [{a,"1.1"}],[{a,[{key2,newval2}]}],
+			   [{"rel0",[new_emu,add_appl]}],
+			   [{"rel0",[old_emu,rm_appl]}],
+			   [restart_emulator]).
 
 %% Create a release tar package which can be installed on top of P1G
-create_upgrade_release(Conf,RelName,RelVsn,Erts,Apps,Config,{UpFromName,Descr}) ->
+create_upgrade_release(Conf,RelName,RelVsn,Erts,Apps,Config,UpFrom) ->
+    create_upgrade_release(Conf,RelName,RelVsn,Erts,Apps,Config,UpFrom,[]).
+create_upgrade_release(Conf,RelName,RelVsn,Erts,Apps,Config,UpFrom,DownTo) ->
+    create_upgrade_release(Conf,RelName,RelVsn,Erts,Apps,Config,UpFrom,DownTo,[]).
+create_upgrade_release(Conf,RelName,RelVsn,Erts,Apps,Config,UpFrom0,DownTo0,RelupOpts) ->
     PrivDir = priv_dir(Conf),
-    DataDir = ?config(data_dir,Conf),
-
     RelDir = filename:join(PrivDir,RelName),
     RelFileName = filename:join(RelDir,RelName),
     RelFile = RelFileName ++ ".rel",
     ok = filelib:ensure_dir(RelFile),
-    LibPath = filename:join([DataDir,lib,"*",ebin]),
 
-    UpFrom = [{filename:join([PrivDir,UpFromName,UpFromName]),Descr}],
+    UpFrom = [{filename:join([PrivDir,UpFromName,UpFromName]),Descr} ||
+		 {UpFromName,Descr} <- UpFrom0],
+    DownTo = [{filename:join([PrivDir,DownToName,DownToName]),Descr} ||
+		 {DownToName,Descr} <- DownTo0],
 
-    create_basic_release(Conf, RelFile, RelVsn, Erts, LibPath,
-			 Apps, Config, UpFrom, []),
+    create_basic_release(Conf,RelFile,RelVsn,Erts,Apps,Config,
+			 UpFrom,DownTo,RelupOpts),
     ok.
 
 %% Create .rel, .script, .boot, sys.config and tar
-create_basic_release(Conf, RelFile,RelVsn,{ErtsVsn,ErtsDir},LibPath,ExtraApps,Config,UpFrom,DownTo) ->
+create_basic_release(Conf,RelFile,RelVsn,{Erts,ErtsDir}) ->
+    create_basic_release(Conf, RelFile,RelVsn,{Erts,ErtsDir},[],[],[],[],[]).
+create_basic_release(Conf,RelFile,RelVsn,{Erts,ErtsDir},ExtraApps,Config,UpFrom,DownTo,RelupOpts) ->
+    DataDir = ?config(data_dir,Conf),
+    PrivDir = priv_dir(Conf),
+    SystemLib = system_lib(PrivDir),
+    LibPath = [filename:join([SystemLib,"*",ebin]),
+	       filename:join([DataDir,lib,"*",ebin])],
+
     RelDir = filename:dirname(RelFile),
     RelFileName = filename:rootname(RelFile),
 
     %% Create .rel file
-    create_installer_rel_file(RelFile,RelVsn,ErtsVsn,ExtraApps),
+    create_installer_rel_file(RelFile,RelVsn,Erts,ExtraApps),
 
     %% Generate .script and .boot
     ok = systools:make_script(RelFileName,
-			      [{path,[LibPath]},
+			      [{path,LibPath},
 			       {outdir,RelDir}]),
 
     %% Generate relup
-    ok = systools:make_relup(RelFileName,UpFrom,DownTo,[{path,[LibPath]},
-							      {outdir,RelDir}]),
+    ok = systools:make_relup(RelFileName,UpFrom,DownTo,[{path,LibPath},
+							{outdir,RelDir} |
+							RelupOpts]),
 
     %% Create sys.config
     ok = write_term_file(filename:join(RelDir,"sys.config"),Config),
@@ -1824,7 +2193,7 @@ create_basic_release(Conf, RelFile,RelVsn,{ErtsVsn,ErtsDir},LibPath,ExtraApps,Co
 
     %% Create tar file (i.e. collect all lib/app-*/* and system files)
     ok = systools:make_tar(RelFileName,
-			   [{path,[LibPath]},
+			   [{path,LibPath},
 			    {outdir,RelDir} |
 			    case ErtsDir of
 				false -> [];
@@ -1841,18 +2210,19 @@ create_basic_release(Conf, RelFile,RelVsn,{ErtsVsn,ErtsDir},LibPath,ExtraApps,Co
     TarFileName.
 
 %% Create a .rel file
-create_installer_rel_file(RelFile,RelVsn,ErtsVsn,ExtraApps) ->
-    create_rel_file(RelFile,"SASL-test",RelVsn,ErtsVsn,
+create_installer_rel_file(RelFile,RelVsn,Erts,ExtraApps) ->
+    create_rel_file(RelFile,"SASL-test",RelVsn,Erts,
 		    [{installer,"1.0"}|ExtraApps]).
 
-create_rel_file(RelFile,RelName,RelVsn,ErtsVsn,ExtraApps) ->
-    {ok,KernelVsn} = application:get_key(kernel,vsn),
-    {ok,StdlibVsn} = application:get_key(stdlib,vsn),
-    {ok,SaslVsn} = application:get_key(sasl,vsn),
+create_rel_file(RelFile,RelName,RelVsn,Erts,ExtraApps) ->
+    ErtsVsn = vsn(erts,Erts),
+    KernelVsn = vsn(kernel,Erts),
+    StdlibVsn = vsn(stdlib,Erts),
+    SaslVsn = vsn(sasl,current),
     application:load(tools),
-    {ok,ToolsVsn} = application:get_key(tools,vsn),
+    ToolsVsn = vsn(tools,current),
     application:load(runtime_tools),
-    {ok,RuntimeToolsVsn} = application:get_key(runtime_tools,vsn),
+    RuntimeToolsVsn = vsn(runtime_tools,current),
     
     RelFileContent = {release,
 		      {RelName, RelVsn},
@@ -2033,7 +2403,7 @@ start_node_unix(Sname,NodeDir) ->
 
 start_node_win32(Sname,NodeDir) ->
     Name = atom_to_list(Sname) ++ "_P1G",
-    ErtsBinDir = filename:join(NodeDir,"erts-4.4/bin"),
+    ErtsBinDir = filename:join([NodeDir,app_dir(erts,old),"bin"]),
 
     StartErlArgs = rh_test_lib:get_start_erl_args(NodeDir),
     ServiceArgs = rh_test_lib:get_service_args(NodeDir, Sname, StartErlArgs),
@@ -2158,7 +2528,6 @@ create_fake_release(Dir,RelName,RelVsn,AppDirs) ->
     RelDir = filename:join(Dir,"rel_" ++ RelVsn),
     Rel = filename:join([RelDir,"rel_" ++ RelVsn]),
     ok = filelib:ensure_dir(Rel),
-    ErtsVsn = erlang:system_info(version),
 
     {Apps,Paths} = 
 	lists:foldl(fun({App,Vsn,Lib},{As,Ps}) ->
@@ -2168,7 +2537,7 @@ create_fake_release(Dir,RelName,RelVsn,AppDirs) ->
 		    {[],[]},
 		    AppDirs),
 
-    create_rel_file(Rel++".rel",RelName,RelVsn,ErtsVsn,Apps),
+    create_rel_file(Rel++".rel",RelName,RelVsn,current,Apps),
     
     %% Generate boot scripts
     ok = systools:make_script(Rel,[local,
@@ -2217,3 +2586,16 @@ modify_tar_win32(Conf, TarFileName) ->
     [ok = erl_tar:add(T,filename:join(TmpDir,F),F,[]) || F <- Fs],
     ok = erl_tar:close(T),
     ok.
+
+app_dir(App,Vsn) ->
+    atom_to_list(App) ++ "-" ++ vsn(App,Vsn).
+vsn(erts,old) -> ?ertsvsn;
+vsn(kernel,old) -> ?kernelvsn;
+vsn(stdlib,old) -> ?stdlibvsn;
+vsn(erts,current) -> erlang:system_info(version);
+vsn(App,current) ->
+    {ok,Vsn} = application:get_key(App,vsn),
+    Vsn.
+
+system_lib(PrivDir) ->
+    filename:join(PrivDir,"system_lib").

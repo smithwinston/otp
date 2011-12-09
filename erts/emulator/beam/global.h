@@ -42,12 +42,6 @@
 typedef struct port Port;
 #include "erl_port_task.h"
 
-#define ERTS_MAX_NO_OF_ASYNC_THREADS 1024
-extern int erts_async_max_threads;
-#define ERTS_ASYNC_THREAD_MIN_STACK_SIZE 16	/* Kilo words */
-#define ERTS_ASYNC_THREAD_MAX_STACK_SIZE 8192	/* Kilo words */
-extern int erts_async_thread_suggested_stack_size;
-
 typedef struct erts_driver_t_ erts_driver_t;
 
 #define SMALL_IO_QUEUE 5   /* Number of fixed elements */
@@ -178,7 +172,7 @@ struct port {
     DistEntry *dist_entry;       /* Dist entry used in DISTRIBUTION */
     char *name;		         /* String used in the open */
     erts_driver_t* drv_ptr;
-    long drv_data;
+    UWord drv_data;
     ErtsProcList *suspended;	 /* List of suspended processes. */
     LineBuf *linebuf;            /* Buffer to hold data not ready for
 				    process to get (line oriented I/O)*/
@@ -211,7 +205,7 @@ erts_port_runq(Port *prt)
 	rq1 = rq2;
     }
 #else
-    return erts_common_run_queue;
+    return ERTS_RUNQ_IX(0);
 #endif
 }
 
@@ -404,7 +398,7 @@ extern Eterm erts_ddll_monitor_driver(Process *p,
 
 typedef struct binary {
     ERTS_INTERNAL_BINARY_FIELDS
-    long orig_size;
+    SWord orig_size;
     char orig_bytes[1]; /* to be continued */
 } Binary;
 
@@ -413,7 +407,7 @@ typedef struct binary {
 
 typedef struct {
     ERTS_INTERNAL_BINARY_FIELDS
-    long orig_size;
+    SWord orig_size;
     void (*destructor)(Binary *);
     char magic_bin_data[1];
 } ErtsMagicBinary;
@@ -547,7 +541,7 @@ ERTS_GLB_INLINE void erts_may_save_closed_port(Port *prt)
 	tombstone = (Eterm*) erts_smp_atomic_add_read_nob(&erts_dead_ports_ptr,
 							  -(erts_aint_t)sizeof(Eterm));
 	ASSERT(tombstone+1 != NULL);
-	ASSERT(prt->snapshot == erts_smp_atomic_read_nob(&erts_ports_snapshot) - 1);
+	ASSERT(prt->snapshot == erts_smp_atomic32_read_nob(&erts_ports_snapshot) - 1);
 	*tombstone = prt->id;
     }
     /*else no ongoing snapshot or port was already included or created after snapshot */
@@ -561,7 +555,6 @@ extern Eterm node_cookie;
 extern erts_smp_atomic_t erts_bytes_out;	/* no bytes written out */
 extern erts_smp_atomic_t erts_bytes_in;		/* no bytes sent into the system */
 extern Uint display_items;	/* no of items to display in traces etc */
-extern Uint display_loads;	/* print info about loaded modules */
 
 extern int erts_backtrace_depth;
 extern erts_smp_atomic32_t erts_max_gen_gcs;
@@ -852,10 +845,16 @@ void erts_queue_monitor_message(Process *,
 				Eterm,
 				Eterm);
 void erts_init_bif(void);
+Eterm erl_send(Process *p, Eterm to, Eterm msg);
+
+/* erl_bif_op.c */
+
+Eterm erl_is_function(Process* p, Eterm arg1, Eterm arg2);
 
 /* erl_bif_port.c */
 
 /* erl_bif_trace.c */
+Eterm erl_seq_trace_info(Process *p, Eterm arg1);
 void erts_system_monitor_clear(Process *c_p);
 void erts_system_profile_clear(Process *c_p);
 
@@ -867,8 +866,14 @@ typedef struct {
     Eterm* fname_ptr;		/* Pointer to fname table */
 } FunctionInfo;
 
-int erts_load_module(Process *c_p, ErtsProcLocks c_p_locks,
-		     Eterm group_leader, Eterm* mod, byte* code, int size);
+struct LoaderState* erts_alloc_loader_state(void);
+Eterm erts_prepare_loading(struct LoaderState*,  Process *c_p,
+			   Eterm group_leader, Eterm* modp,
+			   byte* code, Uint size);
+Eterm erts_finish_loading(struct LoaderState* stp, Process* c_p,
+			  ErtsProcLocks c_p_locks, Eterm* modp);
+Eterm erts_load_module(Process *c_p, ErtsProcLocks c_p_locks,
+		      Eterm group_leader, Eterm* mod, byte* code, Uint size);
 void init_load(void);
 BeamInstr* find_function_from_pc(BeamInstr* pc);
 Eterm* erts_build_mfa_item(FunctionInfo* fi, Eterm* hp,
@@ -1121,7 +1126,9 @@ void erts_init_gc(void);
 int erts_garbage_collect(Process*, int, Eterm*, int);
 void erts_garbage_collect_hibernate(Process* p);
 Eterm erts_gc_after_bif_call(Process* p, Eterm result, Eterm* regs, Uint arity);
-void erts_garbage_collect_literals(Process* p, Eterm* literals, Uint lit_size);
+void erts_garbage_collect_literals(Process* p, Eterm* literals,
+				   Uint lit_size,
+				   struct erl_off_heap_header* oh);
 Uint erts_next_heap_size(Uint, Uint);
 Eterm erts_heap_sizes(Process* p);
 
@@ -1641,8 +1648,7 @@ void monitor_generic(Process *p, Eterm type, Eterm spec);
 Uint erts_trace_flag2bit(Eterm flag);
 int erts_trace_flags(Eterm List, 
 		 Uint *pMask, Eterm *pTracer, int *pCpuTimestamp);
-Eterm erts_bif_trace(int bif_index, Process* p, 
-		     Eterm arg1, Eterm arg2, Eterm arg3, BeamInstr *I);
+Eterm erts_bif_trace(int bif_index, Process* p, Eterm* args, BeamInstr *I);
 
 #ifdef ERTS_SMP
 void erts_send_pending_trace_msgs(ErtsSchedulerData *esdp);

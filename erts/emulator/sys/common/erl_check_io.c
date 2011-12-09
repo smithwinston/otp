@@ -35,6 +35,7 @@
 #include "sys.h"
 #include "global.h"
 #include "erl_check_io.h"
+#include "erl_thr_progress.h"
 
 #ifdef ERTS_SYS_CONTINOUS_FD_NUMBERS
 #  define ERTS_DRV_EV_STATE_EXTRA_SIZE 128
@@ -66,6 +67,9 @@ typedef char EventStateFlags;
 
 #define ERTS_CIO_POLL_CTL	ERTS_POLL_EXPORT(erts_poll_control)
 #define ERTS_CIO_POLL_WAIT	ERTS_POLL_EXPORT(erts_poll_wait)
+#ifdef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+#define ERTS_CIO_POLL_AS_INTR 	ERTS_POLL_EXPORT(erts_poll_async_sig_interrupt)
+#endif
 #define ERTS_CIO_POLL_INTR 	ERTS_POLL_EXPORT(erts_poll_interrupt)
 #define ERTS_CIO_POLL_INTR_TMD	ERTS_POLL_EXPORT(erts_poll_interrupt_timed)
 #define ERTS_CIO_NEW_POLLSET 	ERTS_POLL_EXPORT(erts_poll_create_pollset)
@@ -310,7 +314,7 @@ forget_removed(struct pollset_info* psi)
 	erts_smp_mtx_unlock(mtx);
 	if (drv_ptr) {
 	    int was_unmasked = erts_block_fpe();
-	    (*drv_ptr->stop_select) (fd, NULL);
+	    (*drv_ptr->stop_select) ((ErlDrvEvent) fd, NULL);
 	    erts_unblock_fpe(was_unmasked);
 	    if (drv_ptr->handle) {
 		erts_ddll_dereference_driver(drv_ptr->handle);
@@ -1115,6 +1119,14 @@ eready(Eterm id, ErtsDrvEventState *state, ErlDrvEventData event_data)
 
 static void bad_fd_in_pollset( ErtsDrvEventState *, Eterm, Eterm, ErtsPollEvents);
 
+#ifdef ERTS_POLL_NEED_ASYNC_INTERRUPT_SUPPORT
+void
+ERTS_CIO_EXPORT(erts_check_io_async_sig_interrupt)(void)
+{
+    ERTS_CIO_POLL_AS_INTR(pollset.ps);
+}
+#endif
+
 void
 ERTS_CIO_EXPORT(erts_check_io_interrupt)(int set)
 {
@@ -1122,7 +1134,8 @@ ERTS_CIO_EXPORT(erts_check_io_interrupt)(int set)
 }
 
 void
-ERTS_CIO_EXPORT(erts_check_io_interrupt_timed)(int set, long msec)
+ERTS_CIO_EXPORT(erts_check_io_interrupt_timed)(int set,
+					       erts_short_time_t msec)
 {
     ERTS_CIO_POLL_INTR_TMD(pollset.ps, set, msec);
 }
@@ -1153,7 +1166,6 @@ ERTS_CIO_EXPORT(erts_check_io)(int do_wait)
 #ifdef ERTS_ENABLE_LOCK_CHECK
     erts_lc_check_exact(NULL, 0); /* No locks should be locked */
 #endif
-    erts_smp_activity_begin(ERTS_ACTIVITY_WAIT, NULL, NULL, NULL);
     pollres_len = sizeof(pollres)/sizeof(ErtsPollResFd);
 
     erts_smp_atomic_set_nob(&pollset.in_poll_wait, 1);
@@ -1163,7 +1175,6 @@ ERTS_CIO_EXPORT(erts_check_io)(int do_wait)
 #ifdef ERTS_ENABLE_LOCK_CHECK
     erts_lc_check_exact(NULL, 0); /* No locks should be locked */
 #endif
-    erts_smp_activity_end(ERTS_ACTIVITY_WAIT, NULL, NULL, NULL);
 
     erts_deliver_time(); /* sync the machine's idea of time */
 
@@ -1870,12 +1881,11 @@ ERTS_CIO_EXPORT(erts_check_io_debug)(void)
 
     erts_printf("--- fds in pollset --------------------------------------\n");
 
-#ifdef ERTS_SMP
-# ifdef ERTS_ENABLE_LOCK_CHECK
+#if defined(ERTS_SMP) && defined(ERTS_ENABLE_LOCK_CHECK)
     erts_lc_check_exact(NULL, 0); /* No locks should be locked */
-# endif
-    erts_block_system(0); /* stop the world to avoid messy locking */
 #endif
+
+    erts_smp_thr_progress_block(); /* stop the world to avoid messy locking */
 
 #ifdef ERTS_SYS_CONTINOUS_FD_NUMBERS
     counters.epep = erts_alloc(ERTS_ALC_T_TMP, sizeof(ErtsPollEvents)*max_fds);
@@ -1898,9 +1908,7 @@ ERTS_CIO_EXPORT(erts_check_io_debug)(void)
     safe_hash_for_each(&drv_ev_state_tab, &doit_erts_check_io_debug, (void *) &counters);
 #endif
 
-#ifdef ERTS_SMP
-    erts_release_system();
-#endif
+    erts_smp_thr_progress_unblock();
 
     erts_printf("\n");
     erts_printf("used fds=%d\n", counters.used_fds);

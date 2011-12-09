@@ -45,8 +45,7 @@
          init/2]).
 
 -include_lib("kernel/include/inet_sctp.hrl").
--include_lib("diameter/include/diameter.hrl").
--include("diameter_ct.hrl").
+-include("diameter.hrl").
 
 -define(util, diameter_util).
 
@@ -180,7 +179,8 @@ have_sctp() ->
         {ok, Sock} ->
             gen_sctp:close(Sock),
             true;
-        {error, eprotonosupport} ->  %% fail on any other reason
+        {error, E} when E == eprotonosupport;
+                        E == esocktnosupport -> %% fail on any other reason
             false
     catch
         error: badarg ->

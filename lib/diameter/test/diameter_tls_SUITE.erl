@@ -58,23 +58,13 @@
          stop_ssl/1]).
 
 %% diameter callbacks
--export([peer_up/3,
-         peer_down/3,
-         pick_peer/4,
-         prepare_request/3,
+-export([prepare_request/3,
          prepare_retransmit/3,
          handle_answer/4,
-         handle_error/4,
          handle_request/3]).
 
--ifdef(DIAMETER_CT).
+-include("diameter.hrl").
 -include("diameter_gen_base_rfc3588.hrl").
--else.
--include_lib("diameter/include/diameter_gen_base_rfc3588.hrl").
--endif.
-
--include_lib("diameter/include/diameter.hrl").
--include("diameter_ct.hrl").
 
 %% ===========================================================================
 
@@ -110,7 +100,11 @@
          {'Auth-Application-Id', [Dict:id()]},
          {application, [{alias, ?APP_ALIAS},
                         {dictionary, Dict},
-                        {module, ?MODULE},
+                        {module, #diameter_callback{peer_up = false,
+                                                    peer_down = false,
+                                                    pick_peer = false,
+                                                    handle_error = false,
+                                                    default = ?MODULE}},
                         {answer_errors, callback}]}]).
 
 %% Config for diameter:add_transport/2. In the listening case, listen
@@ -157,16 +151,22 @@ init_per_group(_, Config) ->
 end_per_group(_, _) ->
     ok.
 
+%% Shouldn't really have to know about crypto here but 'ok' from
+%% ssl:start() isn't enough to guarantee that TLS is available.
 init_per_suite(Config) ->
-    case os:find_executable("openssl") of
-        false ->
-            {skip, no_openssl};
-        _ ->
-            Config
+    try
+        false /= os:find_executable("openssl")
+            orelse throw({?MODULE, no_openssl}),
+        ok == crypto:start()
+            orelse throw({?MODULE, no_crypto}),
+        Config
+    catch
+        {?MODULE, E} ->
+            {skip, E}
     end.
 
 end_per_suite(_Config) ->
-    ok.
+    crypto:stop().
 
 %% Testcases to run when services are started and connections
 %% established.
@@ -251,21 +251,6 @@ send5(_Config) ->
 %% ===========================================================================
 %% diameter callbacks
 
-%% peer_up/3
-
-peer_up(_SvcName, _Peer, State) ->
-    State.
-
-%% peer_down/3
-
-peer_down(_SvcName, _Peer, State) ->
-    State.
-
-%% pick_peer/4
-
-pick_peer([Peer], _, ?CLIENT, _State) ->
-    {ok, Peer}.
-
 %% prepare_request/3
 
 prepare_request(#diameter_packet{msg = Req},
@@ -289,11 +274,6 @@ prepare_retransmit(_Pkt, false, _Peer) ->
 handle_answer(Pkt, _Req, ?CLIENT, _Peer) ->
     #diameter_packet{msg = Rec, errors = []} = Pkt,
     Rec.
-
-%% handle_error/4
-
-handle_error(Reason, _Req, ?CLIENT, _Peer) ->
-    {error, Reason}.
 
 %% handle_request/3
 

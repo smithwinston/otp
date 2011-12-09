@@ -110,10 +110,6 @@ static erts_lc_lock_order_t erts_lock_order[] = {
     {	"fun_tab",				NULL			},
     {	"environ",				NULL			},
 #endif
-    {	"asyncq",				"address"		},
-#ifndef ERTS_SMP
-    {	"async_ready",				NULL			},
-#endif
     {	"efile_drv",				"address"		},
 #if defined(ENABLE_CHILD_WAITER_THREAD) || defined(ERTS_SMP)
     {	"child_status",				NULL			},
@@ -125,7 +121,7 @@ static erts_lc_lock_order_t erts_lock_order[] = {
     {	"drv_ev_state",				"address"		},
     {	"safe_hash",				"address"		},
     {   "pollset_rm_list",                      NULL                    },
-    {   "removed_fd_pre_alloc_lock",            NULL                    },
+    {   "removed_fd_pre_alloc_lock",            "address"               },
     {   "state_prealloc",                       NULL                    },
     {	"schdlr_sspnd",				NULL			},
     {	"run_queue",				"address"		},
@@ -138,6 +134,7 @@ static erts_lc_lock_order_t erts_lock_order[] = {
     {	"alcu_init_atoms",			NULL			},
     {	"mseg_init_atoms",			NULL			},
     {	"drv_tsd",				NULL			},
+    {	"async_enq_mtx",			NULL			},
 #ifdef ERTS_SMP
     {	"sys_msg_q", 				NULL			},
     {	"atom_tab",				NULL			},
@@ -151,10 +148,8 @@ static erts_lc_lock_order_t erts_lock_order[] = {
     {	"mtrace_op",				NULL			},
     {	"instr_x",				NULL			},
     {	"instr",				NULL			},
-    {	"fix_alloc",				"index"			},
     {	"alcu_allocator",			"index"			},
     {	"sbmbc_alloc",				"index"			},
-    {	"alcu_delayed_free",			"index"			},
     {	"mseg",					NULL			},
 #if HALFWORD_HEAP
     {	"pmmap",				NULL			},
@@ -175,15 +170,11 @@ static erts_lc_lock_order_t erts_lock_order[] = {
     {	"timeofday",				NULL			},
     {	"breakpoints",				NULL			},
     {	"pollsets_lock",			NULL			},
-    {	"async_id",				NULL			},
     {	"pix_lock",				"address"		},
     {	"run_queues_lists",			NULL			},
-    {	"misc_aux_work_queue",			"index"			},
-    {	"misc_aux_work_pre_alloc_lock",		"address"		},
     {	"sched_stat",				NULL			},
-    {	"run_queue_sleep_list",			"address"		},
 #endif
-    {	"alloc_thr_ix_lock",			NULL			},
+    {	"async_init_mtx",			NULL			},
 #ifdef ERTS_SMP
     {	"proc_lck_qs_alloc",			NULL 			},
 #endif
@@ -1261,7 +1252,7 @@ erts_lc_init_lock(erts_lc_lock_t *lck, char *name, Uint16 flags)
 {
     lck->id = erts_lc_get_lock_order_id(name);
 
-    lck->extra = &lck->extra;
+    lck->extra = (UWord) &lck->extra;
     ASSERT(is_not_immed(lck->extra));
     lck->flags = flags;
     lck->inited = ERTS_LC_INITITALIZED;

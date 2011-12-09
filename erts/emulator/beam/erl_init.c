@@ -42,6 +42,9 @@
 #include "erl_misc_utils.h"
 #include "packet_parser.h"
 #include "erl_cpu_topology.h"
+#include "erl_thr_progress.h"
+#include "erl_thr_queue.h"
+#include "erl_async.h"
 
 #ifdef HIPE
 #include "hipe_mode_switch.h"	/* for hipe_mode_switch_init() */
@@ -68,6 +71,8 @@ static void erl_init(int ncpu);
 
 #define ERTS_MIN_COMPAT_REL 7
 
+static erts_atomic_t exiting;
+
 #ifdef ERTS_SMP
 erts_smp_atomic32_t erts_writing_erl_crash_dump;
 erts_tsd_key_t erts_is_crash_dumping_key;
@@ -87,7 +92,6 @@ int erts_use_sender_punish;
  */
 
 Uint display_items;	    	/* no of items to display in traces etc */
-Uint display_loads;		/* print info about loaded modules */
 int H_MIN_SIZE;			/* The minimum heap grain */
 int BIN_VH_MIN_SIZE;		/* The minimum binary virtual*/
 
@@ -99,8 +103,6 @@ int erts_backtrace_depth;	/* How many functions to show in a backtrace
 				 * in error codes.
 				 */
 
-int erts_async_max_threads;  /* number of threads for async support */
-int erts_async_thread_suggested_stack_size;
 erts_smp_atomic32_t erts_max_gen_gcs;
 
 Eterm erts_error_logger_warnings; /* What to map warning logs to, am_error, 
@@ -109,7 +111,6 @@ Eterm erts_error_logger_warnings; /* What to map warning logs to, am_error,
 
 int erts_compat_rel;
 
-static int use_multi_run_queue;
 static int no_schedulers;
 static int no_schedulers_online;
 
@@ -247,19 +248,16 @@ erl_init(int ncpu)
 {
     init_benchmarking();
 
-#ifdef ERTS_SMP
-    erts_system_block_init();
-#endif
-
     erts_init_monitors();
     erts_init_gc();
     erts_init_time();
     erts_init_sys_common_misc();
     erts_init_process(ncpu);
-    erts_init_scheduling(use_multi_run_queue,
-			 no_schedulers,
+    erts_init_scheduling(no_schedulers,
 			 no_schedulers_online);
     erts_init_cpu_topology(); /* Must be after init_scheduling */
+    erts_alloc_late_init();
+
     H_MIN_SIZE      = erts_next_heap_size(H_MIN_SIZE, 0);
     BIN_VH_MIN_SIZE = erts_next_heap_size(BIN_VH_MIN_SIZE, 0);
 
@@ -281,6 +279,7 @@ erl_init(int ncpu)
     erts_init_node_tables();
     init_dist();
     erl_drv_thr_init();
+    erts_init_async();
     init_io();
     init_copy();
     init_load();
@@ -435,7 +434,7 @@ static void
 load_preloaded(void)
 {
     int i;
-    int res;
+    Eterm res;
     Preload* preload_p;
     Eterm module_name;
     byte* code;
@@ -454,8 +453,9 @@ load_preloaded(void)
 		     name);
 	res = erts_load_module(NULL, 0, NIL, &module_name, code, length);
 	sys_preload_end(&preload_p[i]);
-	if (res < 0)
-	    erl_exit(1,"Failed loading preloaded module %s\n", name);
+	if (res != NIL)
+	    erl_exit(1,"Failed loading preloaded module %s (%T)\n",
+		     name, res);
 	i++;
     }
 }
@@ -497,8 +497,6 @@ void erts_usage(void)
 
     erts_fprintf(stderr, "-K boolean  enable or disable kernel poll\n");
 
-    erts_fprintf(stderr, "-l          turn on auto load tracing\n");
-
     erts_fprintf(stderr, "-M<X> <Y>   memory allocator switches,\n");
     erts_fprintf(stderr, "            see the erts_alloc(3) documentation for more info.\n");
 
@@ -513,6 +511,8 @@ void erts_usage(void)
     erts_fprintf(stderr, "-rg amount  set reader groups limit\n");
     erts_fprintf(stderr, "-sbt type   set scheduler bind type, valid types are:\n");
     erts_fprintf(stderr, "            u|ns|ts|ps|s|nnts|nnps|tnnps|db\n");
+    erts_fprintf(stderr, "-scl bool   enable/disable compaction of scheduler load,\n");
+    erts_fprintf(stderr, "            see the erl(1) documentation for more info.\n");
     erts_fprintf(stderr, "-sct cput   set cpu topology,\n");
     erts_fprintf(stderr, "            see the erl(1) documentation for more info.\n");
     erts_fprintf(stderr, "-swt val    set scheduler wakeup threshold, valid values are:\n");
@@ -607,12 +607,13 @@ early_init(int *argc, char **argv) /*
     int max_main_threads;
     int max_reader_groups;
     int reader_groups;
+    char envbuf[21]; /* enough for any 64-bit integer */
+    size_t envbufsz;
 
-    use_multi_run_queue = 1;
+    erts_sched_compact_load = 1;
     erts_printf_eterm_func = erts_printf_term;
     erts_disable_tolerant_timeofday = 0;
     display_items = 200;
-    display_loads = 0;
     erts_backtrace_depth = DEFAULT_BACKTRACE_SIZE;
     erts_async_max_threads = 0;
     erts_async_thread_suggested_stack_size = ERTS_ASYNC_THREAD_MIN_STACK_SIZE;
@@ -644,6 +645,10 @@ early_init(int *argc, char **argv) /*
     erts_use_r9_pids_ports = 0;
 
     erts_sys_pre_init();
+    erts_atomic_init_nob(&exiting, 0);
+#ifdef ERTS_SMP
+    erts_thr_progress_pre_init();
+#endif
 
 #ifdef ERTS_ENABLE_LOCK_CHECK
     erts_lc_init();
@@ -675,6 +680,16 @@ early_init(int *argc, char **argv) /*
     schdlrs = no_schedulers;
     schdlrs_onln = no_schedulers_online;
 
+    envbufsz = sizeof(envbuf);
+
+    /* erts_sys_getenv() not initialized yet; need erts_sys_getenv__() */
+    if (erts_sys_getenv__("ERL_THREAD_POOL_SIZE", envbuf, &envbufsz) == 0)
+	erts_async_max_threads = atoi(envbuf);
+    else
+	erts_async_max_threads = 0;
+    if (erts_async_max_threads > ERTS_MAX_NO_OF_ASYNC_THREADS)
+	erts_async_max_threads = ERTS_MAX_NO_OF_ASYNC_THREADS;
+
     if (argc && argv) {
 	int i = 1;
 	while (i < *argc) {
@@ -699,6 +714,20 @@ early_init(int *argc, char **argv) /*
 					 max_reader_groups);
 			    erts_usage();
 			}
+		    }
+		    break;
+		}
+		case 'A': {
+		    /* set number of threads in thread pool */
+		    char *arg = get_arg(argv[i]+2, argv[i+1], &i);
+		    if (((erts_async_max_threads = atoi(arg)) < 0) ||
+			(erts_async_max_threads > ERTS_MAX_NO_OF_ASYNC_THREADS)) {
+			erts_fprintf(stderr,
+				     "bad number of async threads %s\n",
+				     arg);
+			erts_usage();
+			VERBOSE(DEBUG_SYSTEM, ("using %d async-threads\n",
+					       erts_async_max_threads));
 		    }
 		    break;
 		}
@@ -767,11 +796,29 @@ early_init(int *argc, char **argv) /*
 
     erts_no_schedulers = (Uint) no_schedulers;
 #endif
+    erts_early_init_scheduling(no_schedulers);
 
+    alloc_opts.ncpu = ncpu;
     erts_alloc_init(argc, argv, &alloc_opts); /* Handles (and removes)
 						 -M flags. */
     /* Require allocators */
-    erts_early_init_scheduling();
+#ifdef ERTS_SMP
+    /*
+     * Thread progress management:
+     *
+     * * Managed threads:
+     * ** Scheduler threads (see erl_process.c)
+     * ** Aux thread (see erl_process.c)
+     * ** Sys message dispatcher thread (see erl_trace.c)
+     *
+     * * Unmanaged threads that need to register:
+     * ** Async threads (see erl_async.c)
+     */
+    erts_thr_progress_init(no_schedulers,
+			   no_schedulers+2,
+			   erts_async_max_threads);
+#endif
+    erts_thr_q_init();
     erts_init_utils();
     erts_early_init_cpu_topology(no_schedulers,
 				 &max_main_threads,
@@ -851,7 +898,6 @@ erl_start(int argc, char **argv)
     int have_break_handler = 1;
     char envbuf[21]; /* enough for any 64-bit integer */
     size_t envbufsz;
-    int async_max_threads = erts_async_max_threads;
     int ncpu = early_init(&argc, argv);
 
     envbufsz = sizeof(envbuf);
@@ -865,11 +911,6 @@ erl_start(int argc, char **argv)
 	Uint16 max_gen_gcs = atoi(envbuf);
 	erts_smp_atomic32_set_nob(&erts_max_gen_gcs,
 				  (erts_aint32_t) max_gen_gcs);
-    }
-
-    envbufsz = sizeof(envbuf);
-    if (erts_sys_getenv("ERL_THREAD_POOL_SIZE", envbuf, &envbufsz) == 0) {
-	async_max_threads = atoi(envbuf);
     }
 
 #if (defined(__APPLE__) && defined(__MACH__)) || defined(__DARWIN__)
@@ -937,9 +978,6 @@ erl_start(int argc, char **argv)
 		erts_fprintf(stderr, "%s unknown flag %s\n", argv[0], argv[i]);
 		erts_usage();
 	    }
-	case 'l':
-	    display_loads++;
-	    break;
 	case 'L':
 	    erts_no_line_info = 1;
 	    break;
@@ -1160,6 +1198,19 @@ erl_start(int argc, char **argv)
 		    erts_usage();
 		}
 	    }
+	    else if (has_prefix("cl", sub_param)) {
+		arg = get_arg(sub_param+2, argv[i+1], &i);
+		if (sys_strcmp("true", arg) == 0)
+		    erts_sched_compact_load = 1;
+		else if (sys_strcmp("false", arg) == 0)
+		    erts_sched_compact_load = 0;
+		else {
+		    erts_fprintf(stderr,
+				 "bad scheduler compact load value '%s'\n",
+				 arg);
+		    erts_usage();
+		}
+	    }
 	    else if (has_prefix("ct", sub_param)) {
 		arg = get_arg(sub_param+2, argv[i+1], &i);
 		res = erts_init_cpu_topology_string(arg);
@@ -1203,12 +1254,8 @@ erl_start(int argc, char **argv)
 		    erts_usage();
 		}
 	    }
-	    else if (sys_strcmp("mrq", sub_param) == 0)
-		use_multi_run_queue = 1;
 	    else if (sys_strcmp("nsp", sub_param) == 0)
 		erts_use_sender_punish = 0;
-	    else if (sys_strcmp("srq", sub_param) == 0)
-		use_multi_run_queue = 0;
 	    else if (sys_strcmp("wt", sub_param) == 0) {
 		arg = get_arg(sub_param+2, argv[i+1], &i);
 		if (erts_sched_set_wakeup_limit(arg) != 0) {
@@ -1301,17 +1348,8 @@ erl_start(int argc, char **argv)
 	    break;
 	}
 
-	case 'A':
-	    /* set number of threads in thread pool */
-	    arg = get_arg(argv[i]+2, argv[i+1], &i);
-	    if (((async_max_threads = atoi(arg)) < 0) ||
-		(async_max_threads > ERTS_MAX_NO_OF_ASYNC_THREADS)) {
-		erts_fprintf(stderr, "bad number of async threads %s\n", arg);
-		erts_usage();
-	    }
-
-	    VERBOSE(DEBUG_SYSTEM, ("using %d async-threads\n",
-				   async_max_threads));
+	case 'A': /* Was handled in early init just read past it */
+	    (void) get_arg(argv[i]+2, argv[i+1], &i);
 	    break;
 
 	case 'a':
@@ -1400,10 +1438,6 @@ erl_start(int argc, char **argv)
 	i++;
     }
 
-#ifdef USE_THREADS
-    erts_async_max_threads = async_max_threads;
-#endif
-
     /* Delayed check of +P flag */
     if (erts_max_processes < ERTS_MIN_PROCESSES
 	|| erts_max_processes > ERTS_MAX_PROCESSES
@@ -1449,6 +1483,10 @@ erl_start(int argc, char **argv)
     erts_sys_main_thread(); /* May or may not return! */
 #else
     erts_thr_set_main_status(1, 1);
+#if ERTS_USE_ASYNC_READY_Q
+    erts_get_scheduler_data()->aux_work_data.async_ready.queue
+	= erts_get_async_ready_queue(1);
+#endif
     set_main_stack_size();
     process_main();
 #endif
@@ -1474,6 +1512,29 @@ __decl_noreturn void erts_thr_fatal_error(int err, char *what)
 static void
 system_cleanup(int exit_code)
 {
+    /*
+     * Make sure only one thread exits the runtime system.
+     */
+    if (erts_atomic_inc_read_nob(&exiting) != 1) {
+	/*
+	 * Another thread is currently exiting the system;
+	 * wait for it to do its job.
+	 */
+#ifdef ERTS_SMP
+	if (erts_thr_progress_is_managed_thread()) {
+	    /*
+	     * The exiting thread might be waiting for
+	     * us to block; need to update status...
+	     */
+	    erts_thr_progress_active(NULL, 0);
+	    erts_thr_progress_prepare_wait(NULL);
+	}
+#endif
+	/* Wait forever... */
+	while (1)
+	    erts_milli_sleep(10000000);
+    }
+
     /* No cleanup wanted if ...
      * 1. we are about to do an abnormal exit
      * 2. we haven't finished initializing, or
@@ -1493,7 +1554,6 @@ system_cleanup(int exit_code)
 #ifdef ERTS_ENABLE_LOCK_CHECK
     erts_lc_check_exact(NULL, 0);
 #endif
-    erts_smp_block_system(ERTS_BS_FLG_ALLOW_GC); /* We never release it... */
 #endif
 
 #ifdef HYBRID
@@ -1522,17 +1582,7 @@ system_cleanup(int exit_code)
     erts_cleanup_incgc();
 #endif
 
-#if defined(USE_THREADS)
-    exit_async();
-#endif
-#if HAVE_ERTS_MSEG
-    erts_mseg_exit();
-#endif
-
-    /*
-     * A lot more cleaning could/should have been done...
-     */
-
+    erts_exit_flush_async();
 }
 
 /*
@@ -1549,9 +1599,9 @@ __decl_noreturn void erl_exit0(char *file, int line, int n, char *fmt,...)
 
     va_start(args, fmt);
 
-    save_statistics();
-
     system_cleanup(n);
+
+    save_statistics();
 
     an = abs(n);
 
@@ -1589,9 +1639,9 @@ __decl_noreturn void erl_exit(int n, char *fmt,...)
 
     va_start(args, fmt);
 
-    save_statistics();
-
     system_cleanup(n);
+
+    save_statistics();
 
     an = abs(n);
 

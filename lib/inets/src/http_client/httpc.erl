@@ -34,7 +34,7 @@
 	 set_option/2, set_option/3,
 	 set_options/1, set_options/2,
 	 store_cookies/2, store_cookies/3, 
-	 cookie_header/1, cookie_header/2, 
+	 cookie_header/1, cookie_header/2, cookie_header/3, 
 	 which_cookies/0, which_cookies/1, 
 	 reset_cookies/0, reset_cookies/1, 
 	 stream_next/1,
@@ -141,7 +141,9 @@ request(Url, Profile) ->
 request(Method, Request, HttpOptions, Options) ->
     request(Method, Request, HttpOptions, Options, default_profile()). 
 
-request(Method, {Url, Headers}, HTTPOptions, Options, Profile) 
+request(Method, 
+	{Url, Headers}, 
+	HTTPOptions, Options, Profile) 
   when (Method =:= options) orelse 
        (Method =:= get) orelse 
        (Method =:= head) orelse 
@@ -154,15 +156,17 @@ request(Method, {Url, Headers}, HTTPOptions, Options, Profile)
 		      {http_options, HTTPOptions}, 
 		      {options,      Options}, 
 		      {profile,      Profile}]),
-    case http_uri:parse(Url) of
+    case http_uri:parse(Url, Options) of
 	{error, Reason} ->
 	    {error, Reason};
-	ParsedUrl ->
+	{ok, ParsedUrl} ->
 	    handle_request(Method, Url, ParsedUrl, Headers, [], [], 
 			   HTTPOptions, Options, Profile)
     end;
      
-request(Method, {Url,Headers,ContentType,Body}, HTTPOptions, Options, Profile) 
+request(Method, 
+	{Url, Headers, ContentType, Body}, 
+	HTTPOptions, Options, Profile) 
   when ((Method =:= post) orelse (Method =:= put)) andalso 
        (is_atom(Profile) orelse is_pid(Profile)) ->
     ?hcrt("request", [{method,       Method}, 
@@ -173,10 +177,10 @@ request(Method, {Url,Headers,ContentType,Body}, HTTPOptions, Options, Profile)
 		      {http_options, HTTPOptions}, 
 		      {options,      Options}, 
 		      {profile,      Profile}]),
-    case http_uri:parse(Url) of
+    case http_uri:parse(Url, Options) of
 	{error, Reason} ->
 	    {error, Reason};
-	ParsedUrl ->
+	{ok, ParsedUrl} ->
 	    handle_request(Method, Url, 
 			   ParsedUrl, Headers, ContentType, Body, 
 			   HTTPOptions, Options, Profile)
@@ -267,7 +271,10 @@ store_cookies(SetCookieHeaders, Url, Profile)
 			    {profile,            Profile}]),
     try 
 	begin
-	    {_, _, Host, Port, Path, _} = http_uri:parse(Url),
+	    %% Since the Address part is not actually used
+	    %% by the manager when storing cookies, we dont
+	    %% care about ipv6-host-with-brackets.
+	    {ok, {_, _, Host, Port, Path, _}} = http_uri:parse(Url),
 	    Address     = {Host, Port}, 
 	    ProfileName = profile_name(Profile),
 	    Cookies     = httpc_cookie:cookies(SetCookieHeaders, Path, Host),
@@ -283,25 +290,36 @@ store_cookies(SetCookieHeaders, Url, Profile)
 
 
 %%--------------------------------------------------------------------------
-%% cookie_header(Url [, Profile]) -> Header | {error, Reason}
-%%               
+%% cookie_header(Url) -> Header | {error, Reason}
+%% cookie_header(Url, Profile) -> Header | {error, Reason}
+%% cookie_header(Url, Opts,  Profile) -> Header | {error, Reason}
+%% 
 %% Description: Returns the cookie header that would be sent when making
 %% a request to <Url>.
 %%-------------------------------------------------------------------------
 cookie_header(Url) ->
     cookie_header(Url, default_profile()).
 
-cookie_header(Url, Profile) ->
+cookie_header(Url, Profile) when is_atom(Profile) orelse is_pid(Profile) ->
+    cookie_header(Url, [], Profile);
+cookie_header(Url, Opts) when is_list(Opts) ->
+    cookie_header(Url, Opts, default_profile()).
+
+cookie_header(Url, Opts, Profile) 
+  when (is_list(Opts) andalso (is_atom(Profile) orelse is_pid(Profile))) ->
     ?hcrt("cookie header", [{url,     Url},
+			    {opts,    Opts}, 
 			    {profile, Profile}]),
     try 
 	begin
-	    httpc_manager:which_cookies(Url, profile_name(Profile))
+	    httpc_manager:which_cookies(Url, Opts, profile_name(Profile))
 	end
     catch 
 	exit:{noproc, _} ->
 	    {error, {not_started, Profile}}
     end.
+    
+    
 
 
 %%--------------------------------------------------------------------------
@@ -464,6 +482,8 @@ handle_request(Method, Url,
 	    HeadersRecord = header_record(NewHeaders, Host2, HTTPOptions),
 	    Receiver      = proplists:get_value(receiver, Options),
 	    SocketOpts    = proplists:get_value(socket_opts, Options),
+	    BracketedHost = proplists:get_value(ipv6_host_with_brackets, 
+						Options),
 	    MaybeEscPath  = maybe_encode_uri(HTTPOptions, Path),
 	    MaybeEscQuery = maybe_encode_uri(HTTPOptions, Query),
 	    AbsUri        = maybe_encode_uri(HTTPOptions, Url),
@@ -482,7 +502,8 @@ handle_request(Method, Url,
 			       stream        = Stream, 
 			       headers_as_is = headers_as_is(Headers0, Options),
 			       socket_opts   = SocketOpts, 
-			       started       = Started},
+			       started       = Started,
+			       ipv6_host_with_brackets = BracketedHost},
 
 	    case httpc_manager:request(Request, profile_name(Profile)) of
 		{ok, RequestId} ->
@@ -739,14 +760,17 @@ request_options_defaults() ->
 		error
 	end,
 
+    VerifyBrackets = VerifyBoolean, 
+
     [
-     {sync,          true,      VerifySync}, 
-     {stream,        none,      VerifyStream},
-     {body_format,   string,    VerifyBodyFormat},
-     {full_result,   true,      VerifyFullResult},
-     {headers_as_is, false,     VerifyHeaderAsIs},
-     {receiver,      self(),    VerifyReceiver},
-     {socket_opts,   undefined, VerifySocketOpts}
+     {sync,                    true,      VerifySync}, 
+     {stream,                  none,      VerifyStream},
+     {body_format,             string,    VerifyBodyFormat},
+     {full_result,             true,      VerifyFullResult},
+     {headers_as_is,           false,     VerifyHeaderAsIs},
+     {receiver,                self(),    VerifyReceiver},
+     {socket_opts,             undefined, VerifySocketOpts},
+     {ipv6_host_with_brackets, false,     VerifyBrackets}
     ]. 
 
 request_options(Options) ->
